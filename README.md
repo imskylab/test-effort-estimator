@@ -22,7 +22,7 @@ work they can do, in this order:
 9. Closure and handover, once everything else is done.
 
 Framework and common methods effort depends on whether the framework is new, extended or
-reused as is; CI/CD effort drops when a pipeline already exists. Both are set on the
+reused as is; CI/CD can be a new pipeline, a hook into an existing one, or not needed. Both are set on the
 Summary and Factors tabs.
 
 Time with no available work counts as waiting. The rules (access lead time, framework core %,

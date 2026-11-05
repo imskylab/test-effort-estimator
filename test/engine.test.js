@@ -109,10 +109,28 @@ test('an existing framework or pipeline reduces effort', () => {
   const ext = E.effort(p);
   assert.ok(Math.abs(ext.lines.otFramework - base.lines.otFramework * 0.4) < 1e-6);
   assert.ok(Math.abs(ext.lines.otCommon - base.lines.otCommon * 0.6) < 1e-6);
-  p.a.frameworkStatus = 'reuse'; p.a.cicdExists = true;
+  p.a.frameworkStatus = 'reuse'; p.a.cicdMode = 'existing';
   const re = E.effort(p);
   assert.ok(re.total < ext.total);
   assert.ok(Math.abs(re.lines.otCicd - base.lines.otCicd * 0.25) < 1e-6);
+});
+
+test('CI/CD not needed removes its work and does not hold up regression runs', () => {
+  const p = project();
+  p.a.cicdMode = 'none';
+  assert.strictEqual(E.effort(p).lines.otCicd, 0);
+  const s = E.schedule(p);
+  assert.ok(!Object.values(s.rows).some(r => r.cat === 'cicd'));
+  assert.ok(!s.ms.cicdDone);
+  assert.ok(s.finish);
+});
+
+test('old CI/CD checkbox is migrated', () => {
+  const p = project();
+  delete p.a.cicdMode; p.a.cicdExists = true;
+  E.migrate(p);
+  assert.strictEqual(p.a.cicdMode, 'existing');
+  assert.strictEqual(p.a.cicdExists, undefined);
 });
 
 test('common methods grow with automated modules', () => {

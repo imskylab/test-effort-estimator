@@ -63,7 +63,7 @@ const ENGINE = (() => {
       fwStatusPct: { extend: { framework: 40, common: 60 }, reuse: { framework: 10, common: 30 } },
       commonPerModule: 16,
       commonMaxPeople: 3,
-      cicdExists: false,
+      cicdMode: 'new',
       cicdExistingPct: 25,
       accessDays: 3,
       frameworkGatePct: 60,
@@ -148,6 +148,8 @@ const ENGINE = (() => {
     P.downtimes = P.downtimes || []; P.holidays = P.holidays || [];
     P.modules.forEach((m, i) => { if (m.priority == null) m.priority = i + 1; if (m.availableFrom == null) m.availableFrom = ''; });
     P.team.forEach(r => r.leaves = r.leaves || []);
+    // v1.5: CI/CD is new, existing or not needed
+    if (P.a.cicdExists != null) { if (P.a.cicdMode === 'new' && P.a.cicdExists) P.a.cicdMode = 'existing'; delete P.a.cicdExists; }
     P.notes = Object.assign({ drivers: '', excluded: '', confirm: '' }, P.notes || {});
     return P;
   }
@@ -160,7 +162,7 @@ const ENGINE = (() => {
     const anyAuto = autoMods.length > 0;
     const st = a.frameworkStatus || 'new';
     const sp = st === 'new' ? { framework: 100, common: 100 } : Object.assign({ framework: 100, common: 100 }, (a.fwStatusPct || {})[st]);
-    const cicdF = a.cicdExists ? (+a.cicdExistingPct || 0) / 100 : 1;
+    const cicdF = a.cicdMode === 'none' ? 0 : a.cicdMode === 'existing' ? (+a.cicdExistingPct || 0) / 100 : 1;
     const b = { start: 0, framework: 0, common: 0, cicd: 0, end: 0 }, items = [];
     a.oneTime.forEach(o => {
       if (!o.on) return;

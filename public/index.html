@@ -259,7 +259,7 @@ const ENGINE = (() => {
       fwStatusPct: { extend: { framework: 40, common: 60 }, reuse: { framework: 10, common: 30 } },
       commonPerModule: 16,
       commonMaxPeople: 3,
-      cicdExists: false,
+      cicdMode: 'new',
       cicdExistingPct: 25,
       accessDays: 3,
       frameworkGatePct: 60,
@@ -344,6 +344,8 @@ const ENGINE = (() => {
     P.downtimes = P.downtimes || []; P.holidays = P.holidays || [];
     P.modules.forEach((m, i) => { if (m.priority == null) m.priority = i + 1; if (m.availableFrom == null) m.availableFrom = ''; });
     P.team.forEach(r => r.leaves = r.leaves || []);
+    // v1.5: CI/CD is new, existing or not needed
+    if (P.a.cicdExists != null) { if (P.a.cicdMode === 'new' && P.a.cicdExists) P.a.cicdMode = 'existing'; delete P.a.cicdExists; }
     P.notes = Object.assign({ drivers: '', excluded: '', confirm: '' }, P.notes || {});
     return P;
   }
@@ -356,7 +358,7 @@ const ENGINE = (() => {
     const anyAuto = autoMods.length > 0;
     const st = a.frameworkStatus || 'new';
     const sp = st === 'new' ? { framework: 100, common: 100 } : Object.assign({ framework: 100, common: 100 }, (a.fwStatusPct || {})[st]);
-    const cicdF = a.cicdExists ? (+a.cicdExistingPct || 0) / 100 : 1;
+    const cicdF = a.cicdMode === 'none' ? 0 : a.cicdMode === 'existing' ? (+a.cicdExistingPct || 0) / 100 : 1;
     const b = { start: 0, framework: 0, common: 0, cicd: 0, end: 0 }, items = [];
     a.oneTime.forEach(o => {
       if (!o.on) return;
@@ -1065,7 +1067,7 @@ function summaryModel(A) {
   const fwText = { new: 'a new automation framework is built for this project', extend: 'our existing automation framework is extended', reuse: 'our ready-made automation framework is reused, so only application-specific code needs to be built' }[a.frameworkStatus || 'new'];
   let ov = `${tc} test cases (${auto} automated) across ${plural(P.modules.length, 'module', 'modules')}, starting ${fd(P.start)}`;
   if (P.end) ov += `, to be delivered in ${calDays(P.start, P.end)} calendar days (${workDaysBetween(P, P.start, P.end)} working days), by ${fd(P.end)}`;
-  ov += `. It assumes ${fwText}${e.autoTCs > 0 ? (a.cicdExists ? ' and hooked into the existing CI/CD pipeline' : ', with a new CI/CD pipeline') : ''}.`;
+  ov += `. It assumes ${fwText}${e.autoTCs > 0 ? ({ existing: ', hooked into the existing CI/CD pipeline', none: ', with no CI/CD pipeline work', new: ', with a new CI/CD pipeline' }[a.cicdMode] || '') : ''}.`;
   M.title = [P.client, P.name].filter(Boolean).join(' ');
   M.overview = ov;
 
@@ -1164,7 +1166,7 @@ function summaryModel(A) {
     ['Application type factor', uniq(P.modules.filter(m => m.automation).map(m => m.appType)).map(k => `${k} ×${nf2.format((a.appTypes.find(x => x.key === k) || { factor: 1 }).factor)}`).join(', ') || '—'],
     ['Test data factor', uniq(P.modules.filter(m => m.automation).map(m => m.testData)).map(k => `×${nf2.format((a.testData.find(x => x.key === k) || { factor: 1 }).factor)} (${k})`).join(', ') || '—'],
     ['Automation framework', (FW_STATUS.find(x => x[0] === a.frameworkStatus) || FW_STATUS[0])[1]],
-    ['CI/CD pipeline', a.cicdExists ? 'Exists, only hooked in' : 'New pipeline'],
+    ['CI/CD pipeline', (CICD_MODES.find(x => x[0] === a.cicdMode) || CICD_MODES[0])[1]],
     ...(P.modules.some(m => m.manualExec) ? [['Manual execution', `${plural(cyc, 'cycle', 'cycles')}, ${a.retestPct}% retest`]] : []),
     ['Best / worst case', `${pct(a.pertBest - 1).replace('-', '−')} / +${pct(a.pertWorst - 1)} of likely`]
   ];
@@ -1299,7 +1301,7 @@ function viewSummary() {
       <label class="field"><span class="lbl">Start date</span>${inp('start', 'date')}</label>
       <label class="field"><span class="lbl">Target end date</span>${inp('end', 'date')}<span class="hint">Leave empty to only work out the finish date</span></label>
       <label class="field"><span class="lbl">Automation framework</span>${sel('a.frameworkStatus', FW_STATUS)}<span class="hint">Adjusts framework and common methods effort</span></label>
-      <label class="field"><span class="lbl">CI/CD pipeline</span><span class="row" style="min-height:31px">${inp('a.cicdExists', 'check')}<span class="small">Already exists, only hook in</span></span></label>
+      <label class="field"><span class="lbl">CI/CD pipeline</span>${sel('a.cicdMode', CICD_MODES)}<span class="hint">Not needed removes CI/CD work; regression runs start once scripts exist</span></label>
     </div>
   </section>
   <section class="panel overview">
@@ -1469,7 +1471,7 @@ function viewFactors() {
       ${f('a.retestPct', 'Retest and defect verification % per cycle')}
     </div></section>
   <section class="panel"><h2>Framework and CI/CD</h2>
-    <p class="small muted">Automation follows this order: framework core, then common methods (login, navigation, waits, data and API helpers), then regular scripting. CI/CD and reporting are set up by one person alongside, and automated regression runs start once the pipeline is ready.</p>
+    <p class="small muted">Automation follows this order: framework core, then common methods (login, navigation, waits, data and API helpers), then regular scripting. CI/CD and reporting are set up by one person alongside, and automated regression runs start once the pipeline is ready (or as soon as scripts exist when CI/CD isn’t needed).</p>
     <div class="fields">
       <label class="field"><span class="lbl">Automation framework</span>${sel('a.frameworkStatus', FW_STATUS)}</label>
       ${f('a.fwStatusPct.extend.framework', 'Extending existing: framework effort %')}
@@ -1477,7 +1479,7 @@ function viewFactors() {
       ${f('a.fwStatusPct.reuse.framework', 'Reusing as is: framework effort %', 'Onboarding and configuration only')}
       ${f('a.fwStatusPct.reuse.common', 'Reusing as is: common methods effort %', 'Application-specific helpers still needed')}
       ${f('a.commonPerModule', 'Common methods per automated module (h)', 'Added to the common methods listed below')}
-      <label class="field"><span class="lbl">CI/CD pipeline already exists</span><span class="row" style="min-height:31px">${inp('a.cicdExists', 'check')}</span></label>
+      <label class="field"><span class="lbl">CI/CD pipeline</span>${sel('a.cicdMode', CICD_MODES)}</label>
       ${f('a.cicdExistingPct', 'Existing pipeline: CI/CD effort %', 'Hooking the suite into the existing pipeline')}
     </div></section>
   <section class="panel"><h2>Scheduling rules</h2>
@@ -1620,6 +1622,7 @@ let rz; window.addEventListener('resize', () => { clearTimeout(rz); rz = setTime
 
 /* ---------- Schedule tab ---------- */
 const FW_STATUS = [['new', 'New framework to build'], ['extend', 'Extend an existing framework'], ['reuse', 'Reuse an existing framework as is']];
+const CICD_MODES = [['new', 'New pipeline to set up'], ['existing', 'Hook into an existing pipeline'], ['none', 'Not needed']];
 const PHASE_OPTS = [['start', 'Project start'], ['framework', 'Framework'], ['common', 'Common methods'], ['cicd', 'CI/CD and reporting'], ['end', 'Project end']];
 function otCounted(o) { const it = E.oneTimeBuckets(S.P).items.find(x => x.id === o.id && x.name === o.name); return it ? H(it.hours) : '0'; }
 function fwNote() { const st = S.P.a.frameworkStatus; return st === 'extend' ? ' (extending existing)' : st === 'reuse' ? ' (reusing existing)' : ''; }
@@ -1957,7 +1960,7 @@ async function exportXlsx() {
     ...a.skills.map(x => ['Tool skill factor: ' + x.key, x.factor]), ...a.roles.map(x => ['Non-development %: ' + x.key, x.nonDevPct]),
     ['Unplanned leave %', a.unplannedLeavePct], ['Everyday downtime %', a.downtimePct], ['Review and rework %', a.reviewPct], ['Script maintenance %', a.maintenancePct],
     ['Reusability saving %', a.reusePct], ['Automated regression runs', a.autoCycles], ['Failure analysis h per 100 scripts per run', a.analysisPer100],
-    ['Manual execution cycles', a.manualCycles], ['Retest %', a.retestPct], ['Contingency %', a.contingencyPct], ['Automation framework', (FW_STATUS.find(x => x[0] === a.frameworkStatus) || [, 'New'])[1]], ['Extend: framework %', a.fwStatusPct.extend.framework], ['Extend: common methods %', a.fwStatusPct.extend.common], ['Reuse: framework %', a.fwStatusPct.reuse.framework], ['Reuse: common methods %', a.fwStatusPct.reuse.common], ['Common methods per automated module h', a.commonPerModule], ['CI/CD pipeline exists', a.cicdExists ? 'Yes' : 'No'], ['Existing pipeline CI/CD %', a.cicdExistingPct], ['Access lead time (working days)', a.accessDays], ['Framework core before common methods %', a.frameworkGatePct], ['People on common methods at once', a.commonMaxPeople], ['People on framework at once', a.frameworkMaxPeople], ['Client review (working days)', a.reviewDays], ['Gap between manual cycles (working days)', a.cycleGapDays], ['Best case multiplier', a.pertBest], ['Worst case multiplier', a.pertWorst],
+    ['Manual execution cycles', a.manualCycles], ['Retest %', a.retestPct], ['Contingency %', a.contingencyPct], ['Automation framework', (FW_STATUS.find(x => x[0] === a.frameworkStatus) || [, 'New'])[1]], ['Extend: framework %', a.fwStatusPct.extend.framework], ['Extend: common methods %', a.fwStatusPct.extend.common], ['Reuse: framework %', a.fwStatusPct.reuse.framework], ['Reuse: common methods %', a.fwStatusPct.reuse.common], ['Common methods per automated module h', a.commonPerModule], ['CI/CD pipeline', (CICD_MODES.find(x => x[0] === a.cicdMode) || CICD_MODES[0])[1]], ['Existing pipeline CI/CD %', a.cicdExistingPct], ['Access lead time (working days)', a.accessDays], ['Framework core before common methods %', a.frameworkGatePct], ['People on common methods at once', a.commonMaxPeople], ['People on framework at once', a.frameworkMaxPeople], ['Client review (working days)', a.reviewDays], ['Gap between manual cycles (working days)', a.cycleGapDays], ['Best case multiplier', a.pertBest], ['Worst case multiplier', a.pertWorst],
     [], ['One-time activity', 'Hours'], ...E.oneTimeBuckets(P).items.map(o => [o.name + ' (' + o.phase + ')', r1(o.hours)])];
   add('Factors', fac, [44, 14]);
   if (A.sched && A.sched.finish) {
