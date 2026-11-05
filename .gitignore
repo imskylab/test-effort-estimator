@@ -1,0 +1,10 @@
+# Saved projects and backups - real project data, keep out of the repo
+data/
+
+# Build output for the claude.ai artifact (rebuild with npm run build)
+dist/
+
+node_modules/
+*.log
+.DS_Store
+Thumbs.db
