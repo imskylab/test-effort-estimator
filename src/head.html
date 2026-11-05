@@ -13,18 +13,18 @@
   --f-body:"IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
   --f-mono:"IBM Plex Mono", ui-monospace, "SFMono-Regular", Consolas, monospace;
   --r:8px;
-  --c-setup:#6250d6; --c-framework:#2a78d6; --c-design:#1baf7a; --c-script:#eb6834; --c-exec:#eda100; --c-runs:#e87ba4; --c-close:#008300;
+  --c-setup:#7b8984; --c-common:#6250d6; --c-cicd:#e34948; --c-framework:#2a78d6; --c-design:#1baf7a; --c-script:#eb6834; --c-exec:#eda100; --c-runs:#e87ba4; --c-close:#008300;
 }
 @media (prefers-color-scheme: dark){:root:not([data-theme="light"]){
   --bg:#111614; --surface:#181f1c; --surface-2:#1d2522; --ink:#e6ece9; --muted:#9caaa4; --faint:#73817b;
   --line:#2b3531; --line-2:#232c29; --accent:#4fc0a6; --accent-ink:#0b1210; --accent-soft:#1a302a;
   --good:#5fd35f; --good-bg:#16301a; --warn:#f2c14e; --warn-bg:#352a10; --bad:#f07474; --bad-bg:#3a1c1c;
-  --s1:#3987e5; --s2:#d95926; --grid:#26302c;  --c-setup:#9085e9; --c-framework:#3987e5; --c-design:#199e70; --c-script:#d95926; --c-exec:#c98500; --c-runs:#d55181; --c-close:#008300; color-scheme:dark}}
+  --s1:#3987e5; --s2:#d95926; --grid:#26302c;  --c-setup:#8e9b96; --c-common:#9085e9; --c-cicd:#e66767; --c-framework:#3987e5; --c-design:#199e70; --c-script:#d95926; --c-exec:#c98500; --c-runs:#d55181; --c-close:#008300; color-scheme:dark}}
 :root[data-theme="dark"]{
   --bg:#111614; --surface:#181f1c; --surface-2:#1d2522; --ink:#e6ece9; --muted:#9caaa4; --faint:#73817b;
   --line:#2b3531; --line-2:#232c29; --accent:#4fc0a6; --accent-ink:#0b1210; --accent-soft:#1a302a;
   --good:#5fd35f; --good-bg:#16301a; --warn:#f2c14e; --warn-bg:#352a10; --bad:#f07474; --bad-bg:#3a1c1c;
-  --s1:#3987e5; --s2:#d95926; --grid:#26302c;  --c-setup:#9085e9; --c-framework:#3987e5; --c-design:#199e70; --c-script:#d95926; --c-exec:#c98500; --c-runs:#d55181; --c-close:#008300; color-scheme:dark}
+  --s1:#3987e5; --s2:#d95926; --grid:#26302c;  --c-setup:#8e9b96; --c-common:#9085e9; --c-cicd:#e66767; --c-framework:#3987e5; --c-design:#199e70; --c-script:#d95926; --c-exec:#c98500; --c-runs:#d55181; --c-close:#008300; color-scheme:dark}
 *{box-sizing:border-box}
 body{background:var(--bg);color:var(--ink);font-family:var(--f-body);font-size:14px;line-height:1.5}
 body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset-top,0px);z-index:10;background:var(--surface)}
@@ -128,6 +128,12 @@ input.w-xs{width:56px}
 .legend .cal-key{width:9px;height:9px;vertical-align:0}
 .legend .cal-ms{border-radius:50%}
 td.main-work{min-width:260px}
+.overview .lead{font-size:15px;line-height:1.55;max-width:90ch}
+.rec{display:grid;gap:4px;padding:14px 18px;border-radius:var(--r);background:var(--accent-soft);border:1px solid var(--accent)}
+.rec p{font-size:15px}
+ul.bul{margin:0;padding-left:18px;display:grid;gap:6px}
+textarea{font:inherit;color:var(--ink);background:var(--surface);border:1px solid var(--line);border-radius:6px;padding:6px 8px;width:100%;resize:vertical;min-width:0}
+textarea:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
 .ftip{position:fixed;white-space:pre-line;max-width:320px;z-index:20}
 .ms-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:6px 18px}
 .ms{display:flex;gap:12px;align-items:baseline;padding:6px 0;border-bottom:1px solid var(--line-2);font-size:13.5px}
@@ -151,7 +157,7 @@ td.main-work{min-width:260px}
 .cal-key{display:inline-block;width:8px;height:8px;border-radius:2px;vertical-align:0;margin-right:5px}
 .cd-marks .cal-key{margin-right:0}
 .cal-hol{background:var(--bad)}
-.cal-leave{background:var(--c-setup)}
+.cal-leave{background:var(--c-common)}
 .cal-ms{background:var(--accent);border-radius:50%}
 .cal-block{background:repeating-linear-gradient(45deg,var(--surface-2) 0 2px,var(--warn) 2px 3.5px)}
 .cal-off{background:var(--line-2);border:1px solid var(--line)}

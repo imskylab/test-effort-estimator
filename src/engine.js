@@ -59,6 +59,12 @@ const ENGINE = (() => {
       leadSpan: 8,
       managerAbove: 20,
       managerAlloc: 50,
+      frameworkStatus: 'new',
+      fwStatusPct: { extend: { framework: 40, common: 60 }, reuse: { framework: 10, common: 30 } },
+      commonPerModule: 16,
+      commonMaxPeople: 3,
+      cicdExists: false,
+      cicdExistingPct: 25,
       accessDays: 3,
       frameworkGatePct: 60,
       frameworkMaxPeople: 2,
@@ -67,13 +73,15 @@ const ENGINE = (() => {
       oneTime: [
         { id: 'ot1', name: 'Test strategy and planning', hours: 40, phase: 'start', on: true },
         { id: 'ot2', name: 'Application walkthrough and KT', hours: 24, phase: 'start', on: true },
-        { id: 'ot3', name: 'Framework design and setup (POC)', hours: 160, phase: 'framework', on: true },
-        { id: 'ot4', name: 'CI/CD pipeline integration', hours: 40, phase: 'framework', on: true },
-        { id: 'ot5', name: 'Reporting and dashboard setup', hours: 24, phase: 'framework', on: true },
+        { id: 'ot3', name: 'Framework design and core development', hours: 160, phase: 'framework', on: true },
+        { id: 'ot9', name: 'Common methods and reusable components', hours: 80, phase: 'common', on: true },
+        { id: 'ot4', name: 'CI/CD pipeline integration', hours: 40, phase: 'cicd', on: true },
+        { id: 'ot5', name: 'Reporting and dashboard setup', hours: 24, phase: 'cicd', on: true },
         { id: 'ot6', name: 'Environment and tool setup', hours: 24, phase: 'start', on: true },
         { id: 'ot7', name: 'Test data strategy', hours: 24, phase: 'start', on: true },
         { id: 'ot8', name: 'Closure report and handover', hours: 16, phase: 'end', on: true }
-      ]
+      ],
+      v13: true
     };
   }
 
@@ -113,25 +121,62 @@ const ENGINE = (() => {
       team: [newResource(1)],
       holidays: defaultHolidays(),
       downtimes: [],
+      notes: { drivers: '', excluded: '', confirm: '' },
       a: defaults()
     };
   }
 
   const find = (arr, key) => arr.find(x => x.key === key);
-  const PHASE_BY_ID = { ot1: 'start', ot2: 'start', ot3: 'framework', ot4: 'framework', ot5: 'framework', ot6: 'start', ot7: 'start', ot8: 'end' };
+  const PHASE_BY_ID = { ot1: 'start', ot2: 'start', ot3: 'framework', ot4: 'cicd', ot5: 'cicd', ot6: 'start', ot7: 'start', ot8: 'end', ot9: 'common' };
+  const PHASES = ['start', 'framework', 'common', 'cicd', 'end'];
 
   // Bring a saved project up to the current data shape.
   function migrate(P) {
+    const needsV13 = !(P.a && P.a.v13);
     P.a = Object.assign(defaults(), P.a || {});
     P.a.oneTime.forEach(o => { if (!o.phase) o.phase = PHASE_BY_ID[o.id] || (o.pool === 'auto' ? 'framework' : 'start'); delete o.pool; });
+    // v1.3: CI/CD and reporting no longer block scripting; common methods are their own step
+    if (needsV13) {
+      P.a.oneTime.forEach(o => { if ((o.id === 'ot4' || o.id === 'ot5') && o.phase === 'framework') o.phase = 'cicd'; });
+      if (!P.a.oneTime.some(o => o.phase === 'common')) {
+        const i = P.a.oneTime.findIndex(o => o.phase === 'framework');
+        P.a.oneTime.splice(i + 1, 0, { id: 'ot9', name: 'Common methods and reusable components', hours: 80, phase: 'common', on: true });
+      }
+      P.a.v13 = true;
+    }
     P.locations = P.locations || ['India', 'USA'];
     P.downtimes = P.downtimes || []; P.holidays = P.holidays || [];
     P.modules.forEach((m, i) => { if (m.priority == null) m.priority = i + 1; if (m.availableFrom == null) m.availableFrom = ''; });
     P.team.forEach(r => r.leaves = r.leaves || []);
+    P.notes = Object.assign({ drivers: '', excluded: '', confirm: '' }, P.notes || {});
     return P;
   }
 
   /* ---------- Effort ---------- */
+  // One-time work by phase, after the framework-status and CI/CD adjustments (hours, no contingency).
+  function oneTimeBuckets(p) {
+    const a = p.a;
+    const autoMods = p.modules.filter(m => m.automation && (+m.autoPct || 0) > 0 && (+m.tcs || 0) > 0);
+    const anyAuto = autoMods.length > 0;
+    const st = a.frameworkStatus || 'new';
+    const sp = st === 'new' ? { framework: 100, common: 100 } : Object.assign({ framework: 100, common: 100 }, (a.fwStatusPct || {})[st]);
+    const cicdF = a.cicdExists ? (+a.cicdExistingPct || 0) / 100 : 1;
+    const b = { start: 0, framework: 0, common: 0, cicd: 0, end: 0 }, items = [];
+    a.oneTime.forEach(o => {
+      if (!o.on) return;
+      const ph = PHASES.includes(o.phase) ? o.phase : 'start';
+      let h = +o.hours || 0;
+      if (ph === 'framework' || ph === 'common') h = anyAuto ? h * (+sp[ph] || 0) / 100 : 0;
+      else if (ph === 'cicd') h = anyAuto ? h * cicdF : 0;
+      b[ph] += h; items.push({ id: o.id, name: o.name, phase: ph, hours: h });
+    });
+    if (anyAuto && +a.commonPerModule > 0) {
+      const h = autoMods.length * (+a.commonPerModule) * (+sp.common || 0) / 100;
+      b.common += h; items.push({ id: 'per-module', name: `Module-specific common methods (${autoMods.length} × ${a.commonPerModule} h)`, phase: 'common', hours: h });
+    }
+    return { b, items };
+  }
+
   function effort(p, scale = 1) {
     const a = p.a;
     const mods = p.modules.map(m => {
@@ -159,15 +204,12 @@ const ENGINE = (() => {
     });
     const sum = k => mods.reduce((s, m) => s + m[k], 0);
     const anyAuto = p.modules.some(m => m.automation), anyManual = p.modules.some(m => m.design || m.manualExec);
-    const ot = { auto: 0, manual: 0, common: 0 };
-    a.oneTime.forEach(o => {
-      if (!o.on) return;
-      if (o.phase === 'framework') { if (anyAuto) ot.auto += +o.hours || 0; }
-      else ot.common += +o.hours || 0;
-    });
+    const { b: OT } = oneTimeBuckets(p);
+    const ot = { auto: OT.framework + OT.common + OT.cicd, manual: 0, common: OT.start + OT.end };
     const lines = {
       design: sum('design'), exec: sum('exec'), script: sum('script'), review: sum('review'),
-      maint: sum('maint'), autoExec: sum('autoExec'), oneTime: ot.auto + ot.manual + ot.common
+      maint: sum('maint'), autoExec: sum('autoExec'), oneTime: ot.auto + ot.manual + ot.common,
+      otFramework: OT.framework, otCommon: OT.common, otCicd: OT.cicd, otOther: OT.start + OT.end
     };
     const variable = lines.design + lines.exec + lines.script + lines.review + lines.maint + lines.autoExec;
     const base = variable + lines.oneTime;
@@ -290,10 +332,12 @@ const ENGINE = (() => {
    * Day-by-day simulation. Each person's productive hours (after holidays, leave, meetings,
    * downtime, ramp-up and skill) are given to the work they're able to do, in this order:
    *   1. project-start activities (strategy, KT, environment, test data)          anyone
-   *   2. framework and common code, at most N people at once                      automation
+   *   2. framework core, at most N people at once                                 automation
+   *   2b. common methods and reusable components, after the framework core        automation
+   *   2c. CI/CD and reporting, one person, alongside; regression runs wait for it  automation
    *   3. manual test design, by module priority, once the module is available     manual
    *   4. scripting: only test cases already designed and past client review,
-   *      after access lead time and once the framework core is ready              automation
+   *      after access lead time and once common methods are ready                 automation
    *   5. manual execution cycles: cycle 1 on reviewed test cases, later cycles
    *      after the previous cycle finishes plus the gap for a new build           manual
    *   6. automated regression runs and failure analysis on scripts that exist      automation
@@ -302,7 +346,7 @@ const ENGINE = (() => {
    * "Both" people work in the order design, scripting, execution, runs. Time that finds no
    * available work is recorded as idle (waiting on dependencies).
    */
-  const CATS = ['setup', 'framework', 'design', 'script', 'exec', 'runs', 'close'];
+  const CATS = ['setup', 'framework', 'common', 'cicd', 'design', 'script', 'exec', 'runs', 'close'];
   const EPS = 1e-7;
 
   function moduleUnits(p, scale, cf) {
@@ -336,12 +380,10 @@ const ENGINE = (() => {
     const cf = (1 + a.contingencyPct / 100) * f;
     const M = moduleUnits(p, scale, cf);
     const anyAuto = M.some(m => m.auto);
-    let stRem = 0, fwRem = 0, endRem = 0;
-    a.oneTime.forEach(o => {
-      if (!o.on) return; const h = (+o.hours || 0) * cf;
-      if (o.phase === 'framework') { if (anyAuto) fwRem += h; } else if (o.phase === 'end') endRem += h; else stRem += h;
-    });
-    const fwTotal = fwRem, gateH = fwTotal * (+a.frameworkGatePct || 0) / 100;
+    const { b: OT } = oneTimeBuckets(p);
+    let stRem = OT.start * cf, fwRem = OT.framework * cf, comRem = OT.common * cf, cicdRem = OT.cicd * cf, endRem = OT.end * cf;
+    const fwTotal = fwRem, comTotal = comRem, cicdTotal = cicdRem, gateH = fwTotal * (+a.frameworkGatePct || 0) / 100;
+    const comMax = Math.max(1, +a.commonMaxPeople || 1);
     const accessDays = Math.max(0, +a.accessDays || 0), reviewDays = Math.max(0, +a.reviewDays || 0);
     const gap = Math.max(0, +a.cycleGapDays || 0), fwMax = Math.max(1, +a.frameworkMaxPeople || 1);
     M.forEach(m => {
@@ -367,7 +409,7 @@ const ENGINE = (() => {
 
     const modDone = m => (!m.design || m.designed >= m.N - EPS) && (!m.auto || m.scripted >= m.autoN - EPS) &&
       (!m.exec || m.ex[m.cyc - 1] >= m.N - EPS) && (!m.auto || m.runDone >= m.autoN * m.rH - EPS);
-    const othersDone = () => stRem <= EPS && fwRem <= EPS && M.every(modDone);
+    const othersDone = () => stRem <= EPS && fwRem <= EPS && comRem <= EPS && cicdRem <= EPS && M.every(modDone);
 
     let wi = -1, finish = null, finishWi = null;
     walk(p, team, start, null, opts.maxDays || 1100, (d, hrs) => {
@@ -382,9 +424,12 @@ const ENGINE = (() => {
       if (!isWD) return;
       const w = rec ? weekOf(d) : 0;
       const accessOK = wi >= accessDays;
-      const gateOK = fwTotal <= EPS || fwTotal - fwRem >= gateH - EPS;
-      if (gateOK && fwTotal > EPS) mark('fwCore', d, 'Framework core ready');
-      let fwPeople = 0;
+      // framework core -> common methods -> scripting; CI/CD runs alongside and gates regression runs
+      const coreOK = fwTotal <= EPS || fwTotal - fwRem >= gateH - EPS;
+      if (coreOK && fwTotal > EPS) mark('fwCore', d, comTotal > EPS ? 'Framework core ready, common methods start' : 'Framework core ready, scripting can start');
+      const gateOK = coreOK && comRem <= EPS;
+      const runsOK = cicdRem <= EPS;
+      let fwPeople = 0, comPeople = 0, cicdPeople = 0;
       const day = rec ? { design: 0, script: 0, exec: 0 } : null;
       for (const k of order) {
         let h = hrs[k];
@@ -411,6 +456,14 @@ const ENGINE = (() => {
           if (take('framework', fwRem, t => { fwRem -= t; }) > 0) fwPeople++;
           if (fwRem <= EPS) mark('fwDone', d, 'Framework complete');
         }
+        if (canA && coreOK && accessOK && comRem > EPS && comPeople < comMax) {
+          if (take('common', comRem, t => { comRem -= t; }) > 0) comPeople++;
+          if (comRem <= EPS) mark('commonDone', d, 'Common methods ready, scripting starts');
+        }
+        if (canA && accessOK && cicdRem > EPS && cicdPeople < 1) {
+          if (take('cicd', cicdRem, t => { cicdRem -= t; }) > 0) cicdPeople++;
+          if (cicdRem <= EPS) mark('cicdDone', d, 'CI/CD pipeline ready, regression runs start');
+        }
         const doDesign = () => { for (const m of M) if (m.avail && m.design && h > EPS) take('design', (m.N - m.designed) * m.dH, t => {
           const u = t / m.dH; m.designed += u; if (rec) day.design += u;
           const last = m.rq[m.rq.length - 1], at = wi + reviewDays;
@@ -421,7 +474,7 @@ const ENGINE = (() => {
           const av = c === 0 ? m.reviewed - m.ex[0] : (wi >= m.ready[c] ? m.N - m.ex[c] : 0);
           take('exec', av * m.xH, t => { const u = t / m.xH; m.ex[c] += u; if (rec) day.exec += u; }, m);
         } };
-        const doRuns = () => { if (!accessOK) return; for (const m of M) if (m.avail && m.auto && h > EPS) take('runs', m.scripted * m.rH - m.runDone, t => { m.runDone += t; }, m); };
+        const doRuns = () => { if (!accessOK || !runsOK) return; for (const m of M) if (m.avail && m.auto && h > EPS) take('runs', m.scripted * m.rH - m.runDone, t => { m.runDone += t; }, m); };
         if (canM && canA) { doDesign(); doRuns(); doScript(); doExec(); }
         else if (canA) { doRuns(); doScript(); }
         else { doDesign(); doExec(); }
@@ -501,6 +554,7 @@ const ENGINE = (() => {
       if (!out.missing.length) {
         out.need = teamNeeded(p, 1, p.end);
         if (out.need.extra != null) Object.assign(out.need, leadsNeeded(p, out.need.extra));
+        if (out.need.extra > 0) out.need.finish = schedule(p, { team: p.team.concat(hireTeam(p, out.need.extra)), record: false }).finish;
         out.needWorst = teamNeeded(p, scen.worst, p.end);
         if (hasTeam) out.scope = scopeFit(p, p.end);
       }
@@ -568,7 +622,7 @@ const ENGINE = (() => {
     return { rows, plan, end, spi, eff, forecast, last, designPerTC: W.wD, execPerRun: W.wX, autoPerTC: W.wA };
   }
 
-  return { defaults, defaultHolidays, newModule, newResource, newProject, migrate, effort, analyse, capacityIn, schedule, tracking,
+  return { defaults, defaultHolidays, newModule, newResource, newProject, migrate, effort, oneTimeBuckets, analyse, capacityIn, schedule, tracking,
     toS, toD, addDays, dow, mondayOf, daysBetween, uid, hireTeam, CATS };
 })();
 if (typeof module !== 'undefined' && module.exports) module.exports = ENGINE;

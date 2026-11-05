@@ -84,12 +84,49 @@ test('the schedule does all the estimated work', () => {
   assert.ok(Math.abs(s.work - E.effort(p).total) < 0.01, `${s.work} vs ${E.effort(p).total}`);
 });
 
-test('scripting waits for the framework core and access lead time', () => {
+test('framework core, then common methods, then scripting', () => {
   const p = exampleTeam(project());
   const s = E.schedule(p);
-  const script = Object.values(s.rows).find(r => r.cat === 'script');
-  assert.ok(script.first >= s.ms.fwCore.date, 'scripting starts on or after framework core');
-  assert.ok(script.first > p.start);
+  const first = cat => Object.values(s.rows).find(r => r.cat === cat).first;
+  assert.ok(first('common') >= s.ms.fwCore.date, 'common methods start after framework core');
+  assert.ok(first('script') >= s.ms.commonDone.date, 'scripting starts after common methods');
+  assert.ok(first('script') > p.start);
+});
+
+test('CI/CD runs alongside and regression runs wait for it', () => {
+  const p = exampleTeam(project());
+  p.a.oneTime.find(o => o.id === 'ot4').hours = 400; // a long pipeline job
+  const s = E.schedule(p);
+  const first = cat => Object.values(s.rows).find(r => r.cat === cat).first;
+  assert.ok(first('script') < s.ms.cicdDone.date, 'scripting does not wait for CI/CD');
+  assert.ok(first('runs') >= s.ms.cicdDone.date, 'regression runs wait for CI/CD');
+});
+
+test('an existing framework or pipeline reduces effort', () => {
+  const p = project();
+  const base = E.effort(p);
+  p.a.frameworkStatus = 'extend';
+  const ext = E.effort(p);
+  assert.ok(Math.abs(ext.lines.otFramework - base.lines.otFramework * 0.4) < 1e-6);
+  assert.ok(Math.abs(ext.lines.otCommon - base.lines.otCommon * 0.6) < 1e-6);
+  p.a.frameworkStatus = 'reuse'; p.a.cicdExists = true;
+  const re = E.effort(p);
+  assert.ok(re.total < ext.total);
+  assert.ok(Math.abs(re.lines.otCicd - base.lines.otCicd * 0.25) < 1e-6);
+});
+
+test('common methods grow with automated modules', () => {
+  const p = project();
+  const one = E.effort(p).lines.otCommon;
+  p.modules.push(E.newModule('Second', 2));
+  assert.strictEqual(E.effort(p).lines.otCommon, one + p.a.commonPerModule);
+});
+
+test('no automation means no framework, common methods or CI/CD', () => {
+  const p = project();
+  p.modules[0].automation = false;
+  const L = E.effort(p).lines;
+  assert.strictEqual(L.otFramework + L.otCommon + L.otCicd, 0);
 });
 
 test('a module is not worked on before it is available', () => {
@@ -121,7 +158,12 @@ test('old saved projects are migrated', () => {
   p.a.oneTime.forEach(o => { o.pool = o.phase === 'framework' ? 'auto' : 'common'; delete o.phase; });
   delete p.a.reviewDays; p.modules.forEach(m => { delete m.priority; delete m.availableFrom; });
   E.migrate(p);
+  delete p.a.v13; p.a.oneTime = p.a.oneTime.filter(o => o.id !== 'ot9');
+  p.a.oneTime.filter(o => o.id === 'ot4' || o.id === 'ot5').forEach(o => { o.pool = 'auto'; });
+  E.migrate(p);
   assert.strictEqual(p.a.oneTime.find(o => o.id === 'ot3').phase, 'framework');
+  assert.strictEqual(p.a.oneTime.find(o => o.id === 'ot4').phase, 'cicd');
+  assert.ok(p.a.oneTime.some(o => o.phase === 'common'), 'common methods added');
   assert.strictEqual(p.a.oneTime.find(o => o.id === 'ot8').phase, 'end');
   assert.strictEqual(p.a.reviewDays, 3);
   assert.strictEqual(p.modules[0].priority, 1);

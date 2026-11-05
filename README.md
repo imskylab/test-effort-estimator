@@ -11,18 +11,33 @@ productive hours (after holidays, leave, meetings, downtime, ramp-up and skill) 
 work they can do, in this order:
 
 1. Project-start activities: strategy, KT, environment and test data setup (anyone).
-2. Framework and common code (automation people, a few at once).
-3. Manual test design, by module priority, once the module is available.
-4. Automation scripting, only on test cases already designed and past client review,
-   after the access lead time and once the framework core is ready.
-5. Manual execution cycles, with a gap for a new build between cycles.
-6. Regression runs and failure analysis on scripts that exist.
-7. Closure and handover, once everything else is done.
+2. Framework core development (automation people, a few at once).
+3. Common methods and reusable components, once the framework core is done.
+4. CI/CD and reporting setup, by one person alongside the framework work.
+5. Manual test design, by module priority, once the module is available.
+6. Automation scripting, only on test cases already designed and past client review,
+   after the access lead time and once common methods are ready.
+7. Manual execution cycles, with a gap for a new build between cycles.
+8. Regression runs and failure analysis on scripts that exist, once CI/CD is ready.
+9. Closure and handover, once everything else is done.
+
+Framework and common methods effort depends on whether the framework is new, extended or
+reused as is; CI/CD effort drops when a pipeline already exists. Both are set on the
+Summary and Factors tabs.
 
 Time with no available work counts as waiting. The rules (access lead time, framework core %,
 people on framework, review turnaround, gap between cycles) are on the Factors tab;
 module priority and "available from" dates are on the Scope tab. The Schedule tab shows
 the phase timeline, who does what each week, a month calendar and the weekly plan.
+
+## Summary tab
+
+The Summary tab answers the three planning questions in FTE and calendar days (how long
+with the current team, how much fits by the target, how many people are needed), gives a
+staffing recommendation, and breaks down effort, productive capacity (per FTE and for the
+team), key factors and what's driving the estimate. Add customer-facing notes (extra
+drivers, exclusions, open questions) at the bottom. "Copy summary" puts the whole summary
+on the clipboard as Markdown, ready for an email, Teams or Slack.
 
 ## Run it
 

@@ -107,7 +107,7 @@ function exampleProject() {
   const P = E.newProject('Example: Retail banking regression');
   P.client = 'Example client';
   const m = (name, o) => Object.assign(E.newModule(name), o);
-  P.end = E.addDays(P.start, 7 * 28 - 3);
+  P.end = E.addDays(P.start, 7 * 29 - 3);
   P.modules = [
     m('Customer web portal', { tcs: 300, mix: { S: 30, M: 40, C: 20, V: 10 }, autoPct: 80, priority: 1 }),
     m('Payments API', { appType: 'API', tcs: 160, mix: { S: 40, M: 40, C: 15, V: 5 }, autoPct: 95, design: true, manualExec: false, priority: 2 }),
@@ -220,105 +220,251 @@ function missingMsg(m) {
   const fix = { manual: 'set someone’s “Works on” to Manual or Both, or turn off manual design and execution on the Scope tab', automation: 'set someone’s “Works on” to Automation or Both, or turn off automation on the Scope tab', 'one-time': 'add an engineer or lead' };
   return m.map(k => `The scope includes ${parts[k]}, but nobody on the team does it: ${fix[k]}.`).join(' ');
 }
+/* ---------- Summary model: one source for the Summary tab and the copied text ---------- */
+const FTE = n => nf1.format(Math.round(n * 10) / 10);
+const nf2 = new Intl.NumberFormat('en-IN', { maximumFractionDigits: 2 });
+const r10 = h => nf0.format(Math.round((h || 0) / 10) * 10);
+const plural = (n, one, many) => `${nf0.format(n)} ${n === 1 ? one : many}`;
+const calDays = (s, d) => E.daysBetween(s, d) + 1;
+function workDaysBetween(P, s, d) { let n = 0; for (let x = s; x <= d; x = E.addDays(x, 1)) if (P.a.workDays.includes(E.dow(x))) n++; return n; }
+const lines = t => String(t || '').split('\n').map(x => x.replace(/^\s*[-*•\d.)]+\s*/, '').trim()).filter(Boolean);
+
+function summaryModel(A) {
+  const P = S.P, a = P.a, e = A.e, L = e.lines;
+  const fte = P.team.reduce((t, r) => t + (+r.alloc || 0) / 100, 0);
+  const tc = Math.round(e.tcs), auto = Math.round(e.autoTCs);
+  const fl = A.finish && A.finish.likely && A.finish.likely.date;
+  const M = { fte, tc, auto, q: [] };
+
+  // overview
+  const fwText = { new: 'a new automation framework is built for this project', extend: 'our existing automation framework is extended', reuse: 'our ready-made automation framework is reused, so only application-specific code needs to be built' }[a.frameworkStatus || 'new'];
+  let ov = `${tc} test cases (${auto} automated) across ${plural(P.modules.length, 'module', 'modules')}, starting ${fd(P.start)}`;
+  if (P.end) ov += `, to be delivered in ${calDays(P.start, P.end)} calendar days (${workDaysBetween(P, P.start, P.end)} working days), by ${fd(P.end)}`;
+  ov += `. It assumes ${fwText}${e.autoTCs > 0 ? (a.cicdExists ? ' and hooked into the existing CI/CD pipeline' : ', with a new CI/CD pipeline') : ''}.`;
+  M.title = [P.client, P.name].filter(Boolean).join(' ');
+  M.overview = ov;
+
+  // questions
+  const teamTxt = `${FTE(fte)} FTE`;
+  if (A.hasTeam && fl) {
+    const d = calDays(P.start, fl), diff = P.end ? E.daysBetween(P.end, fl) : null;
+    M.q.push({ key: 'duration', q: `With the current team of ${teamTxt}, how long do all ${tc} take?`,
+      big: `${nf0.format(d)} calendar days`,
+      sub: `Finishes ${fd(fl)} (${nf0.format(A.finish.likely.workdays)} working days)${diff == null ? '' : diff > 0 ? `, ${plural(diff, 'day', 'days')} more than planned` : diff < 0 ? `, ${plural(-diff, 'day', 'days')} less than planned` : ', on the target date'}.`,
+      chips: [`Best ${A.finish.best.date ? fd(A.finish.best.date) : '—'}`, `Worst ${A.finish.worst.date ? fd(A.finish.worst.date) : 'over 3 years'}`],
+      text: `About **${nf0.format(d)} calendar days**${diff == null ? `, finishing ${fd(fl)}` : diff > 0 ? `, roughly ${plural(diff, 'day', 'days')} more than planned` : diff < 0 ? `, roughly ${plural(-diff, 'day', 'days')} less than planned` : ', on the target date'}` });
+  } else if (A.hasTeam) {
+    M.q.push({ key: 'duration', q: `With the current team of ${teamTxt}, how long do all ${tc} take?`, big: 'Not reachable',
+      sub: A.missing.length ? missingMsg(A.missing) : 'Not within 3 years. Add people or reduce scope.', text: 'Not reachable with the current team' });
+  } else {
+    M.q.push({ key: 'duration', q: 'How long will the current team take?', big: 'Add a team', sub: 'Needs at least one person on the Team tab.', muted: true });
+  }
+  if (P.end && A.hasTeam && A.scope) {
+    const f = A.scope.f;
+    const item = { key: 'scope', q: `With ${teamTxt}, how much is done by the target?` };
+    if (A.scope.oneTimeBlocks) Object.assign(item, { big: '0 test cases', sub: 'Setup and framework work alone take longer than the window.', text: 'Nothing: setup and framework work alone take longer than the window' });
+    else if (f >= 1) Object.assign(item, { big: `All ${tc} test cases`, sub: `Room for about ${f >= 64 ? 'much' : pct(f - 1)} more scope in the same window.`, text: `All **${tc}** test cases, with room for about ${f >= 64 ? 'much' : pct(f - 1)} more` });
+    else { const k = Math.floor(tc * f), ka = Math.floor(e.autoTCs * f);
+      Object.assign(item, { big: `About ${k} of ${tc} test cases`, sub: `About ${ka} automated (${pct(f)} of planned scope, same mix per module).`, text: `About **${k} of ${tc}** test cases (about ${ka} automated)` }); }
+    M.scopeK = f < 1 ? Math.floor(tc * f) : tc;
+    M.q.push(item);
+  } else if (!P.end) {
+    M.q.push({ key: 'scope', q: 'How much is done by the target?', big: 'Set a target date', sub: 'Needed to work out achievable scope.', muted: true });
+  }
+  if (A.need) {
+    const n = A.need, item = { key: 'need', q: `How many people to finish all ${tc} by the target?` };
+    if (n.extra == null) Object.assign(item, { big: 'Not possible by the target', sub: `More people don’t help enough: framework, reviews, build gaps and module availability set a minimum duration.${n.floor ? ` Even with 256 more people the earliest finish is ${fd(n.floor)}.` : ''}`, text: 'Not possible by adding people' });
+    else if (n.extra === 0) Object.assign(item, { big: `${teamTxt} is enough`, sub: A.needWorst && A.needWorst.extra ? `Add ${plural(A.needWorst.extra, 'engineer', 'engineers')} to cover the worst case.` : 'Covers the worst case too.', text: `**${teamTxt}**, the current team is enough` });
+    else {
+      const loc = a.hireLocation, tot = fte + n.extra;
+      const extras = [n.needLeads ? `+${plural(n.needLeads, 'lead', 'leads')}` : '', n.needMgr ? `+1 manager at ${a.managerAlloc}%` : ''].filter(Boolean);
+      Object.assign(item, { big: `${FTE(tot)} FTE`, sub: `${A.hasTeam ? `+${plural(n.extra, 'engineer', 'engineers')} on top of the current team` : plural(n.extra, 'engineer', 'engineers')}, based in ${esc(loc)}, ${esc(a.hireSkill.toLowerCase())}, full-time from day 1.${A.needWorst && A.needWorst.extra != null && A.needWorst.extra > n.extra ? ` Worst case: +${A.needWorst.extra}.` : ''}`,
+        chips: [...n.heads.map(h => `${h.n} × ${h.level}`), ...extras],
+        text: `**${FTE(tot)} FTE** (+${plural(n.extra, 'engineer', 'engineers')}, ${loc})${extras.length ? ', plus ' + extras.join(', ').replace(/\+/g, '') : ''}` });
+    }
+    M.q.push(item);
+  } else if (!P.end) {
+    M.q.push({ key: 'need', q: 'How many people to finish by the target?', big: 'Set a target date', sub: 'Needed to size the team.', muted: true });
+  }
+
+  // recommendation
+  const span = P.end ? Math.max(1, E.daysBetween(P.start, P.end)) : 1;
+  const buf = d => d && P.end ? Math.max(0, E.daysBetween(d, P.end)) / span : 0;
+  const fallback = [M.scopeK != null && M.scopeK < tc ? `a reduced scope (about ${M.scopeK} test cases)` : '', fl && P.end && fl > P.end ? `about ${calDays(P.start, fl)} calendar days` : ''].filter(Boolean);
+  const orElse = fallback.length ? ` Otherwise, agree with the customer on ${fallback.length > 1 ? 'either ' + fallback.join(' or ') : fallback[0]}.` : '';
+  if (A.missing && A.missing.length) M.rec = missingMsg(A.missing);
+  else if (!P.end) M.rec = fl ? `With ${teamTxt}, plan for about ${calDays(P.start, fl)} calendar days (finish ${fd(fl)}). Set a target end date to get a staffing recommendation.` : '';
+  else if (A.status === 'ok') M.rec = `The current ${teamTxt} delivers by ${fd(P.end)} with about ${pct(buf(fl))} buffer, and even the worst case is on time.`;
+  else if (A.status === 'risk') M.rec = `The current ${teamTxt} delivers by ${fd(P.end)} with about ${pct(buf(fl))} buffer, but not in the worst case.${A.needWorst && A.needWorst.extra ? ` To cover the worst case, add ${plural(A.needWorst.extra, 'engineer', 'engineers')}` : ' To cover the worst case'}${A.finish.worst.date ? `, or agree a fallback date of ${fd(A.finish.worst.date)}` : ''}.`;
+  else if (A.need && A.need.extra > 0) M.rec = `Staff ${FTE(fte + A.need.extra)} FTE from day 1 to deliver by ${fd(P.end)}, which leaves about ${pct(buf(A.need.finish))} buffer.${orElse}`;
+  else if (A.need && A.need.extra == null) M.rec = `Adding people won’t bring this in by ${fd(P.end)}.${orElse || ' Move the target date or cut scope.'}`;
+  else M.rec = '';
+
+  // effort
+  const items = E.oneTimeBuckets(P).items.filter(x => x.hours > 0.01);
+  const ph = k => items.filter(x => x.phase === k).map(x => [x.name, x.hours]);
+  const cyc = Math.max(0, Math.round(+a.manualCycles || 0));
+  M.effort = [
+    ...ph('start'), ...ph('framework'), ...ph('common'), ...ph('cicd'),
+    ['Manual test design', L.design], [`Manual execution (${plural(cyc, 'cycle', 'cycles')}, including retest)`, L.exec],
+    ['Automation scripting, including review and maintenance', L.script + L.review + L.maint], ['Regression runs and failure analysis', L.autoExec],
+    ...ph('end'), [`Contingency (${a.contingencyPct}%)`, L.contingency]
+  ].filter(x => x[1] > 0.01);
+  M.total = e.total; M.best = e.total * a.pertBest; M.worst = e.total * a.pertWorst;
+
+  // capacity
+  const w = A.window;
+  if (w && A.hasTeam && fte > 0) {
+    const until = P.end || fl, d = w.ded;
+    const wd = workDaysBetween(P, P.start, until);
+    M.capUntil = until;
+    M.cap = [
+      [`Working hours (${wd} days × ${a.hoursPerDay} h)`, d.gross], ['Public holidays', -d.holidays], ['Planned leave', -d.leave],
+      ['Meetings, reporting and other non-development time', -d.nonDev], [`Unplanned leave (${a.unplannedLeavePct}%)`, -d.unplanned],
+      [`Downtime: environment, builds or access (${a.downtimePct}%)`, -d.downtime], ['Ramp-up and learning curve', -d.ramp],
+      ['Experience and skill adjustment', d.productivity]
+    ].filter(x => Math.abs(x[1]) > 0.5);
+    M.capTotal = w.total; M.capPct = d.gross ? w.total / d.gross : 0;
+  }
+
+  // key factors
+  const mixT = {}; let mixN = 0;
+  P.modules.forEach(m => { const ms = a.complexity.reduce((t, c) => t + (+m.mix[c.key] || 0), 0) || 1; a.complexity.forEach(c => { const n = (+m.tcs || 0) * (+m.mix[c.key] || 0) / ms; mixT[c.key] = (mixT[c.key] || 0) + n; mixN += n; }); });
+  const levels = a.complexity.map(c => c.name).join(' / ');
+  const uniq = arr => [...new Set(arr)];
+  M.factors = [
+    ['Scope', `${tc} test cases, ${auto} automated, ${plural(P.modules.length, 'module', 'modules')}`],
+    [`Complexity mix (${levels})`, a.complexity.map(c => pct(mixN ? mixT[c.key] / mixN : 0)).join(' / ')],
+    [`Automation hours per script (${levels})`, a.complexity.map(c => nf1.format(c.auto)).join(' / ')],
+    ['Application type factor', uniq(P.modules.filter(m => m.automation).map(m => m.appType)).map(k => `${k} ×${nf2.format((a.appTypes.find(x => x.key === k) || { factor: 1 }).factor)}`).join(', ') || '—'],
+    ['Test data factor', uniq(P.modules.filter(m => m.automation).map(m => m.testData)).map(k => `×${nf2.format((a.testData.find(x => x.key === k) || { factor: 1 }).factor)} (${k})`).join(', ') || '—'],
+    ['Automation framework', (FW_STATUS.find(x => x[0] === a.frameworkStatus) || FW_STATUS[0])[1]],
+    ['CI/CD pipeline', a.cicdExists ? 'Exists, only hooked in' : 'New pipeline'],
+    ...(P.modules.some(m => m.manualExec) ? [['Manual execution', `${plural(cyc, 'cycle', 'cycles')}, ${a.retestPct}% retest`]] : []),
+    ['Best / worst case', `${pct(a.pertBest - 1).replace('-', '−')} / +${pct(a.pertWorst - 1)} of likely`]
+  ];
+
+  // drivers
+  const dr = [];
+  if (e.autoTCs > 0) {
+    const share = {}, cnt = {};
+    P.modules.forEach(m => {
+      if (!m.automation) return;
+      const app = (a.appTypes.find(x => x.key === m.appType) || { factor: 1 }).factor, td = (a.testData.find(x => x.key === m.testData) || { factor: 1 }).factor;
+      const ms = a.complexity.reduce((t, c) => t + (+m.mix[c.key] || 0), 0) || 1;
+      a.complexity.forEach(c => { const n = (+m.tcs || 0) * (+m.mix[c.key] || 0) / ms * (+m.autoPct || 0) / 100; cnt[c.key] = (cnt[c.key] || 0) + n; share[c.key] = (share[c.key] || 0) + n * c.auto * app * td; });
+    });
+    const hard = a.complexity.slice(-2), tn = Object.values(cnt).reduce((t, v) => t + v, 0), th = Object.values(share).reduce((t, v) => t + v, 0);
+    const hn = hard.reduce((t, c) => t + (cnt[c.key] || 0), 0), hh = hard.reduce((t, c) => t + (share[c.key] || 0), 0);
+    if (tn > 0 && hn > 0) dr.push(`**Complexity:** ${hard.map(c => c.name.toLowerCase()).join(' and ')} test cases are ${pct(hn / tn)} of the automated cases but ${pct(hh / th)} of the automation effort.`);
+  }
+  const big = M.effort.slice().sort((x, y) => y[1] - x[1])[0];
+  if (big) dr.push(`**Largest activity:** ${pct(big[1] / e.total)} of the effort is ${big[0].charAt(0).toLowerCase() + big[0].slice(1)}.`);
+  if (e.autoTCs > 0 && A.sched && A.sched.ms) {
+    const ready = A.sched.ms.commonDone || A.sched.ms.fwCore;
+    const fwH = L.otFramework + L.otCommon;
+    const lead = { new: 'New framework', extend: 'Extending the existing framework', reuse: 'Ready-made framework' }[a.frameworkStatus || 'new'];
+    if (ready) dr.push(`**${lead}:** framework and common methods take about ${H(fwH)} h, so scripting starts ${fd(ready.date)}, about ${plural(Math.max(1, Math.round(calDays(P.start, ready.date) / 7)), 'week', 'weeks')} in.`);
+  }
+  P.modules.filter(m => m.availableFrom && m.availableFrom > P.start).forEach(m => dr.push(`**${m.name}** isn’t available until ${fd(m.availableFrom)}.`));
+  if (A.sched && A.sched.work > 0) { const idle = A.sched.idle / (A.sched.work + A.sched.idle); if (idle >= 0.1) dr.push(`**Waiting time:** ${pct(idle)} of productive time is spent waiting for work (framework, reviews, module availability or skills).`); }
+  M.drivers = [...dr, ...lines(P.notes.drivers).map(x => /[.!?]$/.test(x) ? x : x + '.')];
+  M.excluded = lines(P.notes.excluded);
+  M.confirm = lines(P.notes.confirm);
+  return M;
+}
+
+const md2html = t => esc(t).replace(/\*\*(.+?)\*\*/g, '<b>$1</b>');
+
+function summaryMarkdown(A) {
+  const M = summaryModel(A), P = S.P;
+  const out = [];
+  out.push(`Here's the summary of the ${M.title || 'test automation'} estimate. It's for ${M.overview}`);
+  if (M.q.filter(q => q.text).length) {
+    out.push('', '**Estimates**', '', '| Question | Answer |', '|---|---|');
+    M.q.filter(q => q.text).forEach(q => out.push(`| ${q.q} | ${q.text} |`));
+  }
+  out.push('', `**Where the effort goes: about ${r10(M.total)} hours** (range ${r10(M.best)} to ${r10(M.worst)})`, '', '| Activity | Hours |', '|---|---|');
+  M.effort.forEach(([n, h]) => out.push(`| ${n} | ${H(h)} |`));
+  out.push(`| **Total** | **${H(M.total)}** |`);
+  if (M.cap) {
+    out.push('', `**Productive capacity, ${fd(P.start)} to ${fd(M.capUntil)}**`, '', `| | Per FTE | Team of ${FTE(M.fte)} FTE |`, '|---|---|---|');
+    M.cap.forEach(([n, h], i) => out.push(`| ${n} | ${i ? (h > 0 ? '+' : '−') : ''}${H(Math.abs(h / M.fte))} | ${i ? (h > 0 ? '+' : '−') : ''}${H(Math.abs(h))} |`));
+    out.push(`| **Productive hours** | **${H(M.capTotal / M.fte)} (${pct(M.capPct)})** | **${H(M.capTotal)}** |`);
+  }
+  out.push('', '**Key factors**', '', '| Factor | Value |', '|---|---|');
+  M.factors.forEach(([n, v]) => out.push(`| ${n} | ${v} |`));
+  if (M.drivers.length) out.push('', '**What\'s driving it**', '', ...M.drivers.map(x => `- ${x}`));
+  if (M.excluded.length) out.push('', '**Not included**', '', ...M.excluded.map(x => `- ${x}`));
+  if (M.confirm.length) out.push('', '**To confirm with the customer**', '', ...M.confirm.map((x, i) => `${i + 1}. ${x}`));
+  if (M.rec) out.push('', `**Recommendation:** ${M.rec}`);
+  return out.join('\n');
+}
+
+async function copySummary() {
+  const text = summaryMarkdown(analysis());
+  try {
+    if (!navigator.clipboard || !navigator.clipboard.writeText) throw new Error('no clipboard');
+    await navigator.clipboard.writeText(text);
+    S.copyNote = 'Copied. Paste it into an email, Teams or Slack.'; S.copyFallback = null;
+  } catch (err) {
+    S.copyFallback = text; S.copyNote = '';
+  }
+  renderAll();
+  if (S.copyFallback) { const t = document.getElementById('copy-fallback'); if (t) { t.focus(); t.select(); } }
+  clearTimeout(S.copyTimer); S.copyTimer = setTimeout(() => { S.copyNote = ''; if (S.tab === 'summary') renderAll(); }, 4000);
+}
+
+function ta(path, rows, ph) { return `<textarea id="${fid(path)}" data-p="${path}" rows="${rows}" placeholder="${esc(ph)}">${esc(getPath(S.P, path))}</textarea>`; }
+
+/* ---------- Summary tab ---------- */
 function viewSummary() {
   const P = S.P, A = analysis(), e = A.e, a = P.a;
   const st = A.status || 'nodate';
-  const w = A.window;
-  let msg;
-  const missMsg = A.missing && A.missing.length ? missingMsg(A.missing) : '';
   const fl = A.finish && A.finish.likely;
-  if (st === 'nodate' && !P.start) msg = 'Set a start date to work out the estimated end date.';
-  else if (st === 'nodate' && !A.hasTeam) msg = 'Add at least one person on the Team tab to work out the estimated end date.';
-  else if (st === 'nodate' && missMsg) msg = missMsg;
-  else if (st === 'nodate' && fl && fl.date) msg = `With the current team, the work is estimated to finish on <b>${fd(fl.date)}</b> (best ${fd(A.finish.best.date)}, worst ${A.finish.worst.date ? fd(A.finish.worst.date) : 'over 3 years'}). Set a target end date to check feasibility, size the team and see how much scope fits.`;
-  else if (st === 'nodate') msg = 'With the current team, the work doesn’t finish within 3 years. Add people or reduce scope.';
-  else if (st === 'noteam') msg = 'No one is on the team yet. The middle card shows the team this scope needs by the target date.';
-  else if (st === 'ok') msg = `The plan fits. The likely finish is <b>${fd(fl.date)}</b>, ${E.daysBetween(fl.date, P.end)} days before the target, and even the worst case (${fd(A.finish.worst.date)}) is on time.`;
-  else if (st === 'risk') msg = `The likely finish, <b>${fd(fl.date)}</b>, is before the target, but the worst case (${A.finish.worst.date ? fd(A.finish.worst.date) : 'over 3 years'}) isn’t, so the buffer is thin.`;
-  else if (missMsg) msg = 'The plan doesn’t fit. ' + missMsg;
-  else if (fl && fl.date) msg = `The plan doesn’t fit. The likely finish is <b>${fd(fl.date)}</b>, ${E.daysBetween(P.end, fl.date)} days after the target.`;
-  else msg = 'The plan doesn’t fit: with the current team the work doesn’t finish within 3 years.';
-  if (A.sched && A.sched.work > 0) {
-    const idle = A.sched.idle / (A.sched.work + A.sched.idle);
-    if (idle >= 0.1) msg += ` ${pct(idle)} of the team’s productive time before the finish is spent waiting for work (framework, reviews, module availability or skills). The Schedule tab shows where.`;
-  }
+  const M = summaryModel(A);
+  const missMsg = A.missing && A.missing.length ? missingMsg(A.missing) : '';
+  let msg;
+  if (!P.start) msg = 'Set a start date to work out the estimated end date.';
+  else if (!A.hasTeam && st === 'nodate') msg = 'Add at least one person on the Team tab to work out the estimated end date.';
+  else if (missMsg) msg = (st === 'no' ? 'The plan doesn’t fit. ' : '') + missMsg;
+  else if (st === 'nodate') msg = fl && fl.date ? `With the current team, the work is estimated to finish on <b>${fd(fl.date)}</b>. Set a target end date to check feasibility, size the team and see how much scope fits.` : 'With the current team, the work doesn’t finish within 3 years. Add people or reduce scope.';
+  else if (st === 'noteam') msg = 'No one is on the team yet. The estimates below show the team this scope needs by the target date.';
+  else if (st === 'ok') msg = `The plan fits. The likely finish is <b>${fd(fl.date)}</b>, and even the worst case (${fd(A.finish.worst.date)}) is on time.`;
+  else if (st === 'risk') msg = `The likely finish, <b>${fd(fl.date)}</b>, is before the target, but the worst case (${A.finish.worst.date ? fd(A.finish.worst.date) : 'over 3 years'}) isn’t.`;
+  else msg = fl && fl.date ? `The plan doesn’t fit. The likely finish is <b>${fd(fl.date)}</b>, ${E.daysBetween(P.end, fl.date)} days after the target.` : 'The plan doesn’t fit: with the current team the work doesn’t finish within 3 years.';
 
-  // Card 1: finish date
-  let c1;
-  if (!A.hasTeam) c1 = `<div class="big muted">Add a team</div><div class="sub">Needs at least one person on the Team tab.</div>`;
-  else if (!A.finish.likely.date) c1 = `<div class="big">Not reachable</div><div class="sub">${A.missing.length ? missingMsg(A.missing) : 'Not within 3 years. Add people or reduce scope.'}</div>`;
-  else {
-    const f = A.finish, late = P.end && f.likely.date > P.end;
-    c1 = `<div class="big">${fd(f.likely.date)}</div>
-      <div class="sub">${nf0.format(f.likely.workdays)} working days from ${fd(P.start)}${P.end ? (late ? `, <b style="color:var(--bad)">${E.daysBetween(P.end, f.likely.date)} days after target</b>` : `, ${E.daysBetween(f.likely.date, P.end)} days before target`) : ''}</div>
-      <div class="chips"><span class="chip">Best ${f.best.date ? fd(f.best.date) : '—'}</span><span class="chip">Worst ${f.worst.date ? fd(f.worst.date) : 'over 3 years'}</span></div>`;
-  }
-  // Card 2: team needed
-  let c2;
-  if (!A.need) c2 = `<div class="big muted">Set a target date</div><div class="sub">Needed to size the team.</div>`;
-  else if (A.need.extra == null) c2 = `<div class="big">Not possible by the target</div><div class="sub">More people don’t help enough: framework setup, reviews, build gaps and module availability set a minimum duration.${A.need.floor ? ` Even with 256 extra people the earliest finish is ${fd(A.need.floor)}.` : ''} Move the target date or cut scope.</div>`;
-  else if (A.need.extra === 0) c2 = `<div class="big">Current team is enough</div><div class="sub">${A.needWorst && A.needWorst.extra ? `Add ${A.needWorst.extra} to cover the worst case.` : 'Covers the worst case too.'}</div>`;
-  else {
-    const n = A.need, head = A.hasTeam ? `+${n.extra} engineers` : `${n.extra} engineers`;
-    c2 = `<div class="big">${head}</div>
-      <div class="sub">${A.hasTeam ? 'On top of the current team, ' : ''}${esc(a.hireSkill.toLowerCase())}, full-time, based in ${esc(a.hireLocation)}, from the start date.${A.needWorst && A.needWorst.extra != null ? ` Worst case: ${A.hasTeam ? '+' : ''}${A.needWorst.extra}.` : ''}</div>
-      <div class="chips">${n.heads.map(h => `<span class="chip">${h.n} × ${esc(h.level)}</span>`).join('')}${n.needLeads ? `<span class="chip">+${n.needLeads} lead${n.needLeads > 1 ? 's' : ''}</span>` : ''}${n.needMgr ? `<span class="chip">+1 manager (${a.managerAlloc}%)</span>` : ''}</div>`;
-  }
-  // Card 3: scope
-  let c3;
-  if (!A.need) c3 = `<div class="big muted">Set a target date</div><div class="sub">Needed to work out achievable scope.</div>`;
-  else if (!A.hasTeam) c3 = `<div class="big muted">Add a team</div><div class="sub">Shows how many test cases the team can finish by the target date.</div>`;
-  else {
-    const f = A.scope.f;
-    if (A.scope.oneTimeBlocks) c3 = `<div class="big">0 test cases</div><div class="sub">One-time activities alone take longer than the window.</div>`;
-    else if (f >= 1) c3 = `<div class="big">All ${nf0.format(e.tcs)} test cases</div><div class="sub">Room for about ${f >= 64 ? 'much' : pct(f - 1)} more scope in the same window.</div>`;
-    else c3 = `<div class="big">${nf0.format(Math.floor(e.tcs * f))} of ${nf0.format(e.tcs)}</div>
-      <div class="sub">${pct(f)} of planned scope, including ${nf0.format(Math.floor(e.autoTCs * f))} automated scripts, keeping the same mix per module.</div>`;
-  }
+  const card = q => `<div class="answer"><div class="q">${esc(q.q)}</div><div class="big${q.muted ? ' muted' : ''}">${esc(q.big)}</div><div class="sub">${q.sub}</div>${q.chips ? `<div class="chips">${q.chips.map(c => `<span class="chip">${esc(c)}</span>`).join('')}</div>` : ''}</div>`;
 
-  const L = e.lines;
-  const lines = [
-    ['Manual test design', L.design], ['Manual execution (cycles + retest)', L.exec], ['Automation scripting', L.script],
-    ['Script review and rework', L.review], ['Script maintenance', L.maint], ['Automation runs and failure analysis', L.autoExec],
-    ['One-time activities', L.oneTime], [`Contingency (${a.contingencyPct}%)`, L.contingency]
-  ].filter(x => x[1] > 0.01);
-  const ex = A.expectedTotal;
   const effortTbl = `<div class="tbl-wrap"><table>
     <thead><tr><th>Activity</th><th class="r">Hours</th><th class="r">Person-days</th><th class="r">Share</th></tr></thead><tbody>
-    ${lines.map(([n, h]) => `<tr><td>${n}</td><td class="r num">${H(h)}</td><td class="r num">${PD(h)}</td><td class="r num">${pct(h / e.total)}</td></tr>`).join('')}
+    ${M.effort.map(([n, h]) => `<tr><td>${esc(n)}</td><td class="r num">${H(h)}</td><td class="r num">${PD(h)}</td><td class="r num">${pct(h / e.total)}</td></tr>`).join('')}
     <tr class="total"><td>Total (likely)</td><td class="r num">${H(e.total)}</td><td class="r num">${PD(e.total)}</td><td class="r num">100%</td></tr>
-    <tr class="sub"><td>Best case (×${a.pertBest})</td><td class="r num">${H(e.total * a.pertBest)}</td><td class="r num">${PD(e.total * a.pertBest)}</td><td></td></tr>
-    <tr class="sub"><td>Worst case (×${a.pertWorst})</td><td class="r num">${H(e.total * a.pertWorst)}</td><td class="r num">${PD(e.total * a.pertWorst)}</td><td></td></tr>
-    <tr class="sub"><td>PERT expected (B + 4L + W) ÷ 6</td><td class="r num">${H(ex)}</td><td class="r num">${PD(ex)}</td><td></td></tr>
+    <tr class="sub"><td>Best case (×${a.pertBest})</td><td class="r num">${H(M.best)}</td><td class="r num">${PD(M.best)}</td><td></td></tr>
+    <tr class="sub"><td>Worst case (×${a.pertWorst})</td><td class="r num">${H(M.worst)}</td><td class="r num">${PD(M.worst)}</td><td></td></tr>
+    <tr class="sub"><td>PERT expected (B + 4L + W) ÷ 6</td><td class="r num">${H(A.expectedTotal)}</td><td class="r num">${PD(A.expectedTotal)}</td><td></td></tr>
     </tbody></table></div>`;
+
+  let capBlock = '';
+  if (M.cap) {
+    const sign = (h, i) => i === 0 ? '' : h > 0 ? '+' : '−';
+    capBlock = `<section class="panel"><div class="panel-head"><h2>Productive capacity</h2><span class="small muted">${fd(P.start)} to ${fd(M.capUntil)}</span></div>
+      <div class="tbl-wrap"><table><thead><tr><th>Item</th><th class="r">Per FTE</th><th class="r">Team of ${FTE(M.fte)} FTE</th></tr></thead><tbody>
+      ${M.cap.map(([n, h], i) => `<tr><td>${esc(n)}</td><td class="r num">${sign(h, i)}${H(Math.abs(h / M.fte))}</td><td class="r num">${sign(h, i)}${H(Math.abs(h))}</td></tr>`).join('')}
+      <tr class="total"><td>Productive hours</td><td class="r num">${H(M.capTotal / M.fte)} (${pct(M.capPct)})</td><td class="r num">${H(M.capTotal)}</td></tr>
+      </tbody></table></div>
+      ${A.sched && A.sched.finish ? `<p class="small muted">Up to the estimated finish, ${H(A.sched.idle)} h (${pct(A.sched.idle / (A.sched.work + A.sched.idle || 1))}) of productive time is spent waiting for work: framework not ready, test cases in review, modules not available yet, or no work left in a person’s skill area.</p>` : ''}
+      <details class="howto"><summary>By person</summary>
+      <div class="tbl-wrap" style="margin-top:8px"><table><thead><tr><th>Name</th><th>Role</th><th>Works on</th><th>Level</th><th class="r">Allocation</th><th class="r">Productive h</th></tr></thead><tbody>
+      ${P.team.map((r, i) => `<tr><td>${esc(r.name)}</td><td>${esc(r.role)}</td><td>${r.role === 'Manager' ? 'Management' : esc(r.activity)}</td><td>${esc(r.level)}</td><td class="r num">${r.alloc}%</td><td class="r num">${H(A.window.per[i])}</td></tr>`).join('')}
+      </tbody></table></div></details></section>`;
+  }
 
   const modTbl = `<div class="tbl-wrap"><table>
     <thead><tr><th>Module</th><th class="r">Test cases</th><th class="r">To automate</th><th class="r">Manual h</th><th class="r">Automation h</th></tr></thead><tbody>
     ${e.mods.map(m => `<tr><td>${esc(m.name)}</td><td class="r num">${nf0.format(m.tcs)}</td><td class="r num">${nf0.format(m.autoTCs)}</td><td class="r num">${H(m.manual)}</td><td class="r num">${H(m.auto)}</td></tr>`).join('')}
-    <tr class="total"><td>Total</td><td class="r num">${nf0.format(e.tcs)}</td><td class="r num">${nf0.format(e.autoTCs)}</td><td class="r num">${H(L.design + L.exec)}</td><td class="r num">${H(L.script + L.review + L.maint + L.autoExec)}</td></tr>
-    </tbody></table></div><p class="small muted">Module figures exclude one-time activities and contingency.</p>`;
-
-  let capBlock = '';
-  if (w && A.hasTeam) {
-    const d = w.ded, rows = [
-      ['Gross hours (working days × hours × allocation)', d.gross, 1], ['Public holidays', -d.holidays], ['Planned leave', -d.leave],
-      ['Meetings, reporting, calls (non-development)', -d.nonDev], [`Unplanned leave (${a.unplannedLeavePct}%)`, -d.unplanned],
-      ['Downtime (environment, builds, blocked windows)', -d.downtime], ['Ramp-up and learning curve', -d.ramp],
-      ['Experience and skill adjustment', d.productivity]
-    ];
-    const mx = d.gross || 1;
-    const until = P.end || (A.finish && A.finish.likely.date);
-    capBlock = `<section class="panel"><div class="panel-head"><h2>Where the team’s time goes</h2><span class="small muted">${fd(P.start)} to ${fd(until)}</span></div>
-      <div class="tbl-wrap"><table><thead><tr><th>Item</th><th class="r">Hours</th><th class="r">Person-days</th><th></th></tr></thead><tbody>
-      ${rows.map(([n, h, g]) => `<tr><td>${n}</td><td class="r num">${h > 0 && !g ? '+' : ''}${H(h)}</td><td class="r num">${PD(h)}</td><td><div class="mini-track"><div class="mini-bar ${g ? '' : 'neg'}" style="width:${Math.min(100, Math.abs(h) / mx * 100)}%"></div></div></td></tr>`).join('')}
-      <tr class="total"><td>Productive capacity</td><td class="r num">${H(w.total)}</td><td class="r num">${PD(w.total)}</td><td><div class="mini-track"><div class="mini-bar" style="width:${Math.min(100, w.total / mx * 100)}%"></div></div></td></tr>
-      </tbody></table></div>
-      ${A.sched && A.sched.finish ? `<p class="small muted">Up to the estimated finish, ${H(A.sched.idle)} h (${pct(A.sched.idle / (A.sched.work + A.sched.idle || 1))}) of productive time is spent waiting for work: framework not ready, test cases in review, modules not available yet, or no work left in a person’s skill area.</p>` : ''}
-      <h3>By person</h3>
-      <div class="tbl-wrap"><table><thead><tr><th>Name</th><th>Role</th><th>Works on</th><th>Level</th><th class="r">Productive h</th><th class="r">Person-days</th></tr></thead><tbody>
-      ${P.team.map((r, i) => `<tr><td>${esc(r.name)}</td><td>${esc(r.role)}</td><td>${r.role === 'Manager' ? 'Management' : esc(r.activity)}</td><td>${esc(r.level)}</td><td class="r num">${H(w.per[i])}</td><td class="r num">${PD(w.per[i])}</td></tr>`).join('')}
-      </tbody></table></div></section>`;
-  }
+    <tr class="total"><td>Total</td><td class="r num">${nf0.format(e.tcs)}</td><td class="r num">${nf0.format(e.autoTCs)}</td><td class="r num">${H(e.lines.design + e.lines.exec)}</td><td class="r num">${H(e.lines.script + e.lines.review + e.lines.maint + e.lines.autoExec)}</td></tr>
+    </tbody></table></div><p class="small muted">Excludes one-time activities and contingency.</p>`;
 
   return `
   <section class="panel">
@@ -327,22 +473,38 @@ function viewSummary() {
       <label class="field"><span class="lbl">Client</span>${inp('client')}</label>
       <label class="field"><span class="lbl">Start date</span>${inp('start', 'date')}</label>
       <label class="field"><span class="lbl">Target end date</span>${inp('end', 'date')}<span class="hint">Leave empty to only work out the finish date</span></label>
+      <label class="field"><span class="lbl">Automation framework</span>${sel('a.frameworkStatus', FW_STATUS)}<span class="hint">Adjusts framework and common methods effort</span></label>
+      <label class="field"><span class="lbl">CI/CD pipeline</span><span class="row" style="min-height:31px">${inp('a.cicdExists', 'check')}<span class="small">Already exists, only hook in</span></span></label>
     </div>
   </section>
+  <section class="panel overview">
+    <div class="panel-head"><h2>${esc(M.title || 'Estimate')}</h2><div class="row">${S.copyNote ? `<span class="small" style="color:var(--good)">${S.copyNote}</span>` : ''}<button class="btn primary" data-act="copy-summary">Copy summary</button></div></div>
+    <p class="lead">${esc(M.overview)}</p>
+    ${S.copyFallback ? `<div class="note">Copying isn’t available here. The text is selected below: press Ctrl+C (or ⌘C) to copy it.<textarea id="copy-fallback" rows="10" readonly style="margin-top:8px">${esc(S.copyFallback)}</textarea><div style="margin-top:6px"><button class="btn" data-act="copy-close">Close</button></div></div>` : ''}
+  </section>
   <div class="verdict">${pill(...STATUS[st === 'nodate' && fl && fl.date ? 'estimate' : st])}<p>${msg}</p></div>
-  <div class="grid3">
-    <div class="answer"><div class="q">When will the current team finish?</div>${c1}</div>
-    <div class="answer"><div class="q">What team is needed by the target date?</div>${c2}</div>
-    <div class="answer"><div class="q">How much scope fits by the target date?</div>${c3}</div>
-  </div>
+  <div class="grid3">${M.q.map(card).join('')}</div>
+  ${M.rec ? `<div class="rec"><span class="lbl">Recommendation</span><p>${esc(M.rec)}</p></div>` : ''}
   ${milestonesPanel(A)}
+  <div class="grid2">
+    <section class="panel"><div class="panel-head"><h2>Where the effort goes</h2><span class="small muted">about ${r10(M.total)} h, range ${r10(M.best)} to ${r10(M.worst)}</span></div>${effortTbl}</section>
+    <div style="display:grid;gap:18px;align-content:start;min-width:0">
+      <section class="panel"><h2>Key factors</h2><div class="tbl-wrap"><table><tbody>${M.factors.map(([n, v]) => `<tr><td class="muted">${esc(n)}</td><td>${esc(v)}</td></tr>`).join('')}</tbody></table></div></section>
+      <section class="panel"><h2>What’s driving it</h2>${M.drivers.length ? `<ul class="bul">${M.drivers.map(x => `<li>${md2html(x)}</li>`).join('')}</ul>` : '<p class="muted small">Nothing stands out yet.</p>'}</section>
+    </div>
+  </div>
+  ${capBlock}
+  <section class="panel"><h2>Notes for the customer</h2>
+    <p class="small muted">One item per line. These go into the copied summary.</p>
+    <div class="grid3">
+      <label class="field"><span class="lbl">More on what’s driving it</span>${ta('notes.drivers', 5, 'e.g. Test cases depend on configuration settings and run for two login types')}</label>
+      <label class="field"><span class="lbl">Not included</span>${ta('notes.excluded', 5, 'e.g. Lead effort\nCross-browser testing\nAccessibility testing')}</label>
+      <label class="field"><span class="lbl">To confirm with the customer</span>${ta('notes.confirm', 5, 'e.g. Which test cases are in scope\nAccess to reset test data\nCaptcha bypass on test environments')}</label>
+    </div>
+  </section>
   <section class="panel"><div class="panel-head"><h2>Capacity against effort</h2><div class="legend"><span><i style="background:var(--s1)"></i>Cumulative productive capacity</span><span><i style="background:var(--ink);height:0;border-top:2px dashed var(--ink)"></i>Effort needed (likely)</span></div></div>
     <div class="chart" id="cap-chart"></div></section>
-  <div class="grid2">
-    <section class="panel"><h2>Effort by activity</h2>${effortTbl}</section>
-    <section class="panel"><h2>Effort by module</h2>${modTbl}</section>
-  </div>
-  ${capBlock}`;
+  <section class="panel"><h2>Effort by module</h2>${modTbl}</section>`;
 }
 
 /* ---------- Scope ---------- */
@@ -481,18 +643,32 @@ function viewFactors() {
       ${f('a.manualCycles', 'Manual execution cycles')}
       ${f('a.retestPct', 'Retest and defect verification % per cycle')}
     </div></section>
+  <section class="panel"><h2>Framework and CI/CD</h2>
+    <p class="small muted">Automation follows this order: framework core, then common methods (login, navigation, waits, data and API helpers), then regular scripting. CI/CD and reporting are set up by one person alongside, and automated regression runs start once the pipeline is ready.</p>
+    <div class="fields">
+      <label class="field"><span class="lbl">Automation framework</span>${sel('a.frameworkStatus', FW_STATUS)}</label>
+      ${f('a.fwStatusPct.extend.framework', 'Extending existing: framework effort %')}
+      ${f('a.fwStatusPct.extend.common', 'Extending existing: common methods effort %')}
+      ${f('a.fwStatusPct.reuse.framework', 'Reusing as is: framework effort %', 'Onboarding and configuration only')}
+      ${f('a.fwStatusPct.reuse.common', 'Reusing as is: common methods effort %', 'Application-specific helpers still needed')}
+      ${f('a.commonPerModule', 'Common methods per automated module (h)', 'Added to the common methods listed below')}
+      <label class="field"><span class="lbl">CI/CD pipeline already exists</span><span class="row" style="min-height:31px">${inp('a.cicdExists', 'check')}</span></label>
+      ${f('a.cicdExistingPct', 'Existing pipeline: CI/CD effort %', 'Hooking the suite into the existing pipeline')}
+    </div></section>
   <section class="panel"><h2>Scheduling rules</h2>
     <div class="fields">
       ${f('a.accessDays', 'Access and environment lead time (working days)', 'No scripting or execution before this; KT, design and framework can start')}
-      ${f('a.frameworkGatePct', 'Framework core needed before scripting %', 'Share of framework hours done before scripting can start')}
+      ${f('a.frameworkGatePct', 'Framework core before common methods start %', 'Share of framework development done before common methods can start')}
+      ${f('a.commonMaxPeople', 'People on common methods at once')}
       ${f('a.frameworkMaxPeople', 'People on framework at once', 'Framework work doesn’t split well across many people')}
       ${f('a.reviewDays', 'Client review of test cases (working days)', 'Designed test cases can be scripted or executed after this')}
       ${f('a.cycleGapDays', 'Gap between manual cycles (working days)', 'Waiting for the next build before the next cycle')}
     </div></section>
   <section class="panel"><div class="panel-head"><h2>One-time activities</h2><button class="btn" data-act="add-ot">Add activity</button></div>
-    <p class="small muted">“When” places the activity in the schedule. Project start work is done by anyone in the first days. Framework work is done by automation people, and scripting waits for its usable core. Project end work happens once everything else is finished. Reduce framework hours if you’re extending an existing framework.</p>
-    <div class="tbl-wrap"><table><thead><tr><th>Include</th><th>Activity</th><th>Hours</th><th>When</th><th></th></tr></thead><tbody>
-    ${a.oneTime.map((o, i) => `<tr><td>${inp(`a.oneTime.${i}.on`, 'check', '', 'aria-label="Include"')}</td><td>${inp(`a.oneTime.${i}.name`, 'text', 'w-l')}</td><td>${inp(`a.oneTime.${i}.hours`, 'num')}</td><td>${sel(`a.oneTime.${i}.phase`, [['start', 'Project start'], ['framework', 'Framework'], ['end', 'Project end']])}</td><td><button class="btn ghost" data-act="rm-ot" data-i="${i}">Remove</button></td></tr>`).join('')}
+    <p class="small muted">“When” places the activity in the schedule. Project start work is done by anyone in the first days. Framework, common methods and CI/CD work is done by automation people in that order (CI/CD alongside). Project end work happens once everything else is finished. “Counted h” is after the framework and CI/CD settings above, before contingency.</p>
+    <div class="tbl-wrap"><table><thead><tr><th>Include</th><th>Activity</th><th>Hours</th><th>When</th><th class="r">Counted h</th><th></th></tr></thead><tbody>
+    ${a.oneTime.map((o, i) => `<tr><td>${inp(`a.oneTime.${i}.on`, 'check', '', 'aria-label="Include"')}</td><td>${inp(`a.oneTime.${i}.name`, 'text', 'w-l')}</td><td>${inp(`a.oneTime.${i}.hours`, 'num')}</td><td>${sel(`a.oneTime.${i}.phase`, PHASE_OPTS)}</td><td class="r num">${otCounted(o)}</td><td><button class="btn ghost" data-act="rm-ot" data-i="${i}">Remove</button></td></tr>`).join('')}
+    ${(() => { const pm = E.oneTimeBuckets(P).items.find(x => x.id === 'per-module'); return pm ? `<tr class="sub"><td></td><td class="muted">${esc(pm.name)}</td><td></td><td class="muted">Common methods</td><td class="r num">${H(pm.hours)}</td><td></td></tr>` : ''; })()}
     </tbody></table></div></section>
   <section class="panel"><h2>Risk range</h2>
     <div class="fields">${f('a.contingencyPct', 'Contingency buffer %', 'Added to the likely estimate')}${f('a.pertBest', 'Best case multiplier')}${f('a.pertWorst', 'Worst case multiplier')}</div>
@@ -618,11 +794,15 @@ function drawBurnChart() {
 let rz; window.addEventListener('resize', () => { clearTimeout(rz); rz = setTimeout(() => { if (S.tab === 'summary') drawCapChart(); if (S.tab === 'tracking') drawBurnChart(); if (S.tab === 'schedule') { drawGantt(); drawHeat(); } }, 150); });
 
 /* ---------- Schedule tab ---------- */
+const FW_STATUS = [['new', 'New framework to build'], ['extend', 'Extend an existing framework'], ['reuse', 'Reuse an existing framework as is']];
+const PHASE_OPTS = [['start', 'Project start'], ['framework', 'Framework'], ['common', 'Common methods'], ['cicd', 'CI/CD and reporting'], ['end', 'Project end']];
+function otCounted(o) { const it = E.oneTimeBuckets(S.P).items.find(x => x.id === o.id && x.name === o.name); return it ? H(it.hours) : '0'; }
+function fwNote() { const st = S.P.a.frameworkStatus; return st === 'extend' ? ' (extending existing)' : st === 'reuse' ? ' (reusing existing)' : ''; }
 const CAT = {
-  setup: 'Onboarding and setup', framework: 'Framework and common code', design: 'Manual test design',
+  setup: 'Onboarding and setup', framework: 'Framework development', common: 'Common methods', cicd: 'CI/CD and reporting', design: 'Manual test design',
   script: 'Automation scripting', exec: 'Manual execution', runs: 'Regression runs', close: 'Closure and handover', idle: 'Waiting for work'
 };
-const CAT_ORDER = ['setup', 'framework', 'design', 'script', 'exec', 'runs', 'close'];
+const CAT_ORDER = ['setup', 'framework', 'common', 'cicd', 'design', 'script', 'exec', 'runs', 'close'];
 const catColor = c => `var(--c-${c})`;
 const legendHTML = (cats, extra = '') => `<div class="legend">${cats.map(c => c === 'idle'
   ? `<span><i class="sw sw-idle"></i>${CAT.idle}</span>` : `<span><i class="sw" style="background:${catColor(c)}"></i>${CAT[c]}</span>`).join('')}${extra}</div>`;
@@ -634,7 +814,7 @@ function milestonesPanel(A) {
   if (!sc || !sc.ms) return '';
   const list = Object.entries(sc.ms).filter(([k]) => !k.endsWith(':done')).map(([k, v]) => ({ k, ...v }));
   if (P.end) list.push({ k: 'target', date: P.end, label: 'Target end date' });
-  list.sort((x, y) => x.date < y.date ? -1 : x.date > y.date ? 1 : (x.k === 'finish' ? 1 : -1));
+  list.sort((x, y) => x.date < y.date ? -1 : x.date > y.date ? 1 : (x.k === 'finish' || x.k === 'target') - (y.k === 'finish' || y.k === 'target'));
   return `<section class="panel"><div class="panel-head"><h2>Key milestones</h2><button class="btn" data-tab="schedule">Open schedule</button></div>
     <div class="ms-list">${list.map(m => `<div class="ms ${m.k === 'finish' ? 'ms-finish' : m.k === 'target' ? 'ms-target' : ''}"><span class="num">${fd(m.date)}</span><span>${esc(m.label)}</span></div>`).join('')}</div></section>`;
 }
@@ -688,7 +868,7 @@ function drawGantt() {
   const W = labelW + nW * colW + 8;
   const rows = [];
   const add = key => { const r = sc.rows[key]; if (r) rows.push({ type: 'row', r, label: CAT[r.cat] }); };
-  add('setup'); add('framework');
+  add('setup'); add('framework'); add('common'); add('cicd');
   const modOrder = sc.mods;
   modOrder.forEach(m => {
     const pm = P.modules.find(x => x.id === m.id);
@@ -696,7 +876,7 @@ function drawGantt() {
     ['design', 'script', 'exec', 'runs'].forEach(c => { const r = sc.rows[m.id + ':' + c]; if (r) rows.push({ type: 'row', r, label: CAT[c], indent: true }); });
   });
   add('close');
-  const Hh = headH + rows.length * rowH + 8;
+  const Hh = headH + rows.length * rowH + 34;
   const X = d => labelW + E.daysBetween(w0, d) / 7 * colW;
   let s = `<svg width="${W}" height="${Hh}" viewBox="0 0 ${W} ${Hh}" role="img" aria-label="Phase timeline">${svgHatch}`;
   // header: months and week ticks
@@ -722,17 +902,21 @@ function drawGantt() {
     });
   });
   // milestones on framework row
-  const fwIdx = rows.findIndex(x => x.r && x.r.key === 'framework');
-  if (fwIdx >= 0 && sc.ms.fwCore) { const x = X(sc.ms.fwCore.date), y = headH + fwIdx * rowH; s += `<path d="M${x} ${y + 4}l6 7l-6 7l-6 -7z" fill="var(--ink)" stroke="var(--surface)" stroke-width="1.5" data-tip="Framework core ready: ${fd(sc.ms.fwCore.date)}. Scripting can start."/>`; }
+  [['framework', 'fwCore'], ['common', 'commonDone'], ['cicd', 'cicdDone']].forEach(([rk, mk]) => {
+    const idx = rows.findIndex(x => x.r && x.r.key === rk), m = sc.ms[mk];
+    if (idx < 0 || !m) return;
+    const x = X(m.date) + colW / 7, y = headH + idx * rowH;
+    s += `<path d="M${x} ${y + 4}l6 7l-6 7l-6 -7z" fill="var(--ink)" stroke="var(--surface)" stroke-width="1.5" data-tip="${esc(m.label)}: ${fd(m.date)}"/>`;
+  });
   // target / finish / today lines
-  const vline = (d, color, dash, label, anchorEnd) => { const x = X(d) + colW / 7; s += `<line x1="${x}" x2="${x}" y1="20" y2="${Hh}" stroke="${color}" stroke-width="1.5" ${dash ? 'stroke-dasharray="4 3"' : ''}/><text x="${x + (anchorEnd ? -4 : 4)}" y="${Hh - 4}" text-anchor="${anchorEnd ? 'end' : 'start'}" class="g-week" style="fill:${color}">${label}</text>`; };
+  const vline = (d, color, dash, label, anchorEnd, ly = Hh - 4) => { const x = X(d) + colW / 7; s += `<line x1="${x}" x2="${x}" y1="20" y2="${ly - 10}" stroke="${color}" stroke-width="1.5" ${dash ? 'stroke-dasharray="4 3"' : ''}/><text x="${x + (anchorEnd ? -4 : 4)}" y="${ly}" text-anchor="${anchorEnd ? 'end' : 'start'}" class="g-week" style="fill:${color}">${label}</text>`; };
   const nearEnd = d => X(d) > W - 120;
   if (P.end && P.end === sc.finish) vline(sc.finish, 'var(--accent)', false, 'Finish = target ' + fdShort(sc.finish), nearEnd(sc.finish));
   else {
     if (P.end) vline(P.end, 'var(--ink)', true, 'Target ' + fdShort(P.end), sc.finish > P.end || nearEnd(P.end));
-    vline(sc.finish, 'var(--accent)', false, 'Finish ' + fdShort(sc.finish), (P.end && sc.finish < P.end) || nearEnd(sc.finish));
+    vline(sc.finish, 'var(--accent)', false, 'Finish ' + fdShort(sc.finish), (P.end && sc.finish < P.end) || nearEnd(sc.finish), Hh - 17);
   }
-  const today = E.toS(Date.now()); if (today > w0 && today < E.addDays(w0, nW * 7)) vline(today, 'var(--faint)', true, 'Today', false);
+  const today = E.toS(Date.now()); if (today > w0 && today < E.addDays(w0, nW * 7)) vline(today, 'var(--faint)', true, 'Today', false, Hh - 17);
   s += '</svg>';
   el.innerHTML = s;
 }
@@ -873,6 +1057,8 @@ document.addEventListener('click', ev => {
     case 'del-no': S.confirmDel = false; renderHeader(); break;
     case 'del-yes': S.confirmDel = false; deleteProject(); break;
     case 'xlsx': exportXlsx(); break;
+    case 'copy-summary': copySummary(); break;
+    case 'copy-close': S.copyFallback = null; renderAll(); break;
     case 'add-mod': mut(() => P.modules.push(E.newModule('Module ' + (P.modules.length + 1), P.modules.length + 1))); break;
     case 'rm-mod': mut(() => P.modules.splice(i, 1)); break;
     case 'add-res': mut(() => { const r = E.newResource(P.team.length + 1); r.location = P.locations[0]; P.team.push(r); }); break;
@@ -916,7 +1102,9 @@ async function exportXlsx() {
   const add = (name, rows, widths) => { const ws = XLSX.utils.aoa_to_sheet(rows); if (widths) ws['!cols'] = widths.map(w => ({ wch: w })); XLSX.utils.book_append_sheet(wb, ws, name); };
   const r1 = v => Math.round(v * 10) / 10;
   const st = STATUS[A.status || 'nodate'][1];
+  const SM = summaryModel(A);
   const sum = [
+    ['Overview', SM.overview], ['Recommendation', SM.rec || ''], [],
     ['Project', P.name], ['Client', P.client], ['Start date', P.start], ['Target end date', P.end || ''], ['Status', st], [],
     ['Total effort (likely), hours', r1(e.total)], ['Total effort (likely), person-days', r1(e.total / a.hoursPerDay)],
     ['Best case, hours', r1(e.total * a.pertBest)], ['Worst case, hours', r1(e.total * a.pertWorst)], ['PERT expected, hours', r1(A.expectedTotal)], [],
@@ -924,11 +1112,14 @@ async function exportXlsx() {
   ];
   if (A.finish) sum.push(['Finish with current team (likely)', A.finish.likely.date || 'Not reachable'], ['Finish (best)', A.finish.best.date || ''], ['Finish (worst)', A.finish.worst.date || '']);
   if (A.need) sum.push(['Extra engineers needed by target', A.need.extra ?? 'Over 300'], ['Extra engineers for worst case', A.needWorst.extra ?? 'Over 300'], ['Mix of extra engineers', (A.need.heads || []).map(h => h.n + ' x ' + h.level).join(', ')], ['Extra leads', A.need.needLeads || 0], ['Extra manager', A.need.needMgr || 0]);
+  sum.push([], ['What\'s driving it'], ...SM.drivers.map(x => ['', x.replace(/\*\*/g, '')]));
+  if (SM.excluded.length) sum.push([], ['Not included'], ...SM.excluded.map(x => ['', x]));
+  if (SM.confirm.length) sum.push([], ['To confirm with the customer'], ...SM.confirm.map(x => ['', x]));
   if (A.scope) sum.push(['Share of scope achievable by target', r1(A.scope.f * 100) + '%'], ['Test cases achievable by target', Math.floor(e.tcs * Math.min(A.scope.f, 1))]);
   if (A.window) sum.push([], ['Productive capacity in window, hours', r1(A.window.total)]);
   add('Summary', sum, [40, 30]);
   const L = e.lines;
-  add('Effort', [['Activity', 'Hours', 'Person-days'], ...[['Manual test design', L.design], ['Manual execution', L.exec], ['Automation scripting', L.script], ['Review and rework', L.review], ['Script maintenance', L.maint], ['Automation runs and failure analysis', L.autoExec], ['One-time activities', L.oneTime], ['Contingency', L.contingency], ['Total', e.total]].map(([n, h]) => [n, r1(h), r1(h / a.hoursPerDay)])], [38, 12, 12]);
+  add('Effort', [['Activity', 'Hours', 'Person-days'], ...[['Manual test design', L.design], ['Manual execution', L.exec], ['Automation scripting', L.script], ['Review and rework', L.review], ['Script maintenance', L.maint], ['Automation runs and failure analysis', L.autoExec], ['Framework development', L.otFramework], ['Common methods', L.otCommon], ['CI/CD and reporting setup', L.otCicd], ['Other one-time activities', L.otOther], ['Contingency', L.contingency], ['Total', e.total]].map(([n, h]) => [n, r1(h), r1(h / a.hoursPerDay)])], [38, 12, 12]);
   add('Modules', [['Module', 'App type', 'Test cases', ...a.complexity.map(c => c.name + ' %'), 'Design', 'Manual run', 'Automate', 'To automate %', 'Test data', 'Manual h', 'Automation h'],
     ...P.modules.map((m, i) => [m.name, m.appType, m.tcs, ...a.complexity.map(c => m.mix[c.key]), m.design ? 'Yes' : 'No', m.manualExec ? 'Yes' : 'No', m.automation ? 'Yes' : 'No', m.autoPct, m.testData, r1(e.mods[i].manual), r1(e.mods[i].auto)])], [28, 12, 10]);
   add('Team', [['Name', 'Role', 'Works on', 'Experience', 'Tool skill', 'Allocation %', 'Location', 'From', 'To', 'Leave', 'Productive h in window'],
@@ -941,8 +1132,8 @@ async function exportXlsx() {
     ...a.skills.map(x => ['Tool skill factor: ' + x.key, x.factor]), ...a.roles.map(x => ['Non-development %: ' + x.key, x.nonDevPct]),
     ['Unplanned leave %', a.unplannedLeavePct], ['Everyday downtime %', a.downtimePct], ['Review and rework %', a.reviewPct], ['Script maintenance %', a.maintenancePct],
     ['Reusability saving %', a.reusePct], ['Automated regression runs', a.autoCycles], ['Failure analysis h per 100 scripts per run', a.analysisPer100],
-    ['Manual execution cycles', a.manualCycles], ['Retest %', a.retestPct], ['Contingency %', a.contingencyPct], ['Access lead time (working days)', a.accessDays], ['Framework core before scripting %', a.frameworkGatePct], ['People on framework at once', a.frameworkMaxPeople], ['Client review (working days)', a.reviewDays], ['Gap between manual cycles (working days)', a.cycleGapDays], ['Best case multiplier', a.pertBest], ['Worst case multiplier', a.pertWorst],
-    [], ['One-time activity', 'Hours'], ...a.oneTime.filter(o => o.on).map(o => [o.name + ' (' + o.phase + ')', o.hours])];
+    ['Manual execution cycles', a.manualCycles], ['Retest %', a.retestPct], ['Contingency %', a.contingencyPct], ['Automation framework', (FW_STATUS.find(x => x[0] === a.frameworkStatus) || [, 'New'])[1]], ['Extend: framework %', a.fwStatusPct.extend.framework], ['Extend: common methods %', a.fwStatusPct.extend.common], ['Reuse: framework %', a.fwStatusPct.reuse.framework], ['Reuse: common methods %', a.fwStatusPct.reuse.common], ['Common methods per automated module h', a.commonPerModule], ['CI/CD pipeline exists', a.cicdExists ? 'Yes' : 'No'], ['Existing pipeline CI/CD %', a.cicdExistingPct], ['Access lead time (working days)', a.accessDays], ['Framework core before common methods %', a.frameworkGatePct], ['People on common methods at once', a.commonMaxPeople], ['People on framework at once', a.frameworkMaxPeople], ['Client review (working days)', a.reviewDays], ['Gap between manual cycles (working days)', a.cycleGapDays], ['Best case multiplier', a.pertBest], ['Worst case multiplier', a.pertWorst],
+    [], ['One-time activity', 'Hours'], ...E.oneTimeBuckets(P).items.map(o => [o.name + ' (' + o.phase + ')', r1(o.hours)])];
   add('Factors', fac, [44, 14]);
   if (A.sched && A.sched.finish) {
     const sc = A.sched;
