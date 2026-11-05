@@ -39,6 +39,19 @@ team), key factors and what's driving the estimate. Add customer-facing notes (e
 drivers, exclusions, open questions) at the bottom. "Copy summary" puts the whole summary
 on the clipboard as Markdown, ready for an email, Teams or Slack.
 
+## Tracking and status email
+
+Each week, log per module how many test cases were designed, automated and executed, plus
+team hours, highlights and blockers. Progress is earned at each module's own estimated hours
+and compared with the Schedule tab's weekly plan, giving a schedule index, a per-module status
+and a forecast finish (early weeks are damped towards the plan).
+
+The status email builds a draft for any logged week: overall status, this week vs plan,
+progress by module, highlights, risks and blockers, next week's plan, milestones, holidays and
+leave, and what's needed from the customer. Choose the client or internal version (internal
+adds hours, productivity and names on leave), edit the draft in place, then copy it formatted
+for Outlook or Teams, or as plain text.
+
 ## Run it
 
 Needs Node.js 18 or later. There are no packages to install.

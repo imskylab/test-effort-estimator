@@ -186,3 +186,46 @@ test('old saved projects are migrated', () => {
   assert.strictEqual(p.a.reviewDays, 3);
   assert.strictEqual(p.modules[0].priority, 1);
 });
+
+/* ---------- tracking and weekly report ---------- */
+function trackedProject() {
+  const p = exampleTeam(project({ end: '2027-06-30' }));
+  p.modules = [Object.assign(E.newModule('Web', 1), { tcs: 200 }), Object.assign(E.newModule('API', 2), { tcs: 100, appType: 'API', manualExec: false })];
+  return p;
+}
+
+test('module actuals earn at module weights; legacy totals still count', () => {
+  const p = trackedProject(); const [w, a] = p.modules.map(m => m.id);
+  const T1 = E.tracking(p, [{ week: '2026-11-16', hours: 100, mods: { [w]: { automated: 10 } } }]);
+  const T2 = E.tracking(p, [{ week: '2026-11-16', hours: 100, mods: { [a]: { automated: 10 } } }]);
+  assert.ok(T1.rows[0].earned > T2.rows[0].earned, 'a web script is worth more than an API script');
+  const T3 = E.tracking(p, [{ week: '2026-11-16', hours: 100, designed: 10, automated: 5, executed: 0 }]);
+  assert.ok(T3.rows[0].earned > 0);
+  assert.strictEqual(T3.rows[0].designed, 10);
+});
+
+test('weekly report gives this week, to date, plan and module status', () => {
+  const p = trackedProject(); const [w, a] = p.modules.map(m => m.id);
+  const acts = [
+    { week: '2026-11-16', hours: 120, mods: { [w]: { designed: 20 } } },
+    { week: '2026-11-23', hours: 120, mods: { [w]: { designed: 25 }, [a]: { designed: 5 } }, blockers: 'Env down' },
+    { week: '2026-11-30', hours: 120, mods: { [w]: { designed: 25, automated: 3 } } }
+  ];
+  const R = E.weekReport(p, acts, null, '2026-11-23');
+  assert.strictEqual(R.weekNo, 2);
+  assert.deepStrictEqual(R.totals.week, { designed: 30, automated: 0, executed: 0 });
+  assert.strictEqual(R.totals.toDate.designed, 50, 'report ignores later weeks');
+  assert.strictEqual(R.mods.find(m => m.id === w).act.designed, 45);
+  assert.ok(R.thisPlan && R.nextPlan && R.toPlan);
+  assert.ok(['ok', 'risk', 'no'].includes(R.status));
+  assert.strictEqual(E.weekReport(p, acts, null, '2027-01-04'), null);
+});
+
+test('falling far behind shows as behind with a later forecast', () => {
+  const p = trackedProject(); const [w] = p.modules.map(m => m.id);
+  const weeks = ['2026-11-16', '2026-11-23', '2026-11-30', '2026-12-07', '2026-12-14', '2026-12-21'];
+  const acts = weeks.map(week => ({ week, hours: 100, mods: { [w]: { designed: 2 } } }));
+  const R = E.weekReport(p, acts, null, weeks[5]);
+  assert.strictEqual(R.status, 'no');
+  assert.ok(R.forecast > R.plannedFinish);
+});

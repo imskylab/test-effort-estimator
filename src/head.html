@@ -134,6 +134,16 @@ td.main-work{min-width:260px}
 ul.bul{margin:0;padding-left:18px;display:grid;gap:6px}
 textarea{font:inherit;color:var(--ink);background:var(--surface);border:1px solid var(--line);border-radius:6px;padding:6px 8px;width:100%;resize:vertical;min-width:0}
 textarea:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+.plan-hint{display:block;font-size:11px;color:var(--faint);margin-top:2px}
+td .plan-hint{display:inline;margin-left:6px}
+tr.sel td{background:var(--accent-soft)}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:6px;overflow:hidden}
+.seg button{border:0;background:var(--surface);color:var(--muted);font:500 13px var(--f-body);padding:6px 12px;cursor:pointer}
+.seg button.on{background:var(--accent);color:var(--accent-ink)}
+.subject-row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.subject-row input{flex:1;min-width:200px}
+.mail{background:#ffffff;color:#1f2a26;border:1px solid var(--line);border-radius:var(--r);padding:16px 20px;max-height:640px;overflow:auto;min-width:0}
+.mail:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
 .ftip{position:fixed;white-space:pre-line;max-width:320px;z-index:20}
 .ms-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:6px 18px}
 .ms{display:flex;gap:12px;align-items:baseline;padding:6px 0;border-bottom:1px solid var(--line-2);font-size:13.5px}

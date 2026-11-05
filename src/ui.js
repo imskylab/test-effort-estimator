@@ -686,39 +686,237 @@ function viewFactors() {
 }
 
 /* ---------- Tracking ---------- */
+/* ---------- Tracking tab ---------- */
+const ST_LABEL = { ok: 'On track', risk: 'At risk', no: 'Behind', ahead: 'Ahead', notstarted: 'Not started' };
+const ST_PILL = { ok: 'ok', risk: 'risk', no: 'no', ahead: 'ok', notstarted: 'na' };
+const KINDS = [['designed', 'Test cases designed', 'design', 'designN'], ['automated', 'Test cases automated', 'script', 'autoN'], ['executed', 'Manual executions', 'exec', 'runs']];
+const n0 = v => nf0.format(Math.round(v || 0));
+
 function viewTracking() {
   const P = S.P, A = analysis(), T = E.tracking(P, S.actuals, A.sched);
   S.T = T;
-  const rows = T.rows.map(r => `<tr>
-    <td>${fd(r.week)}</td>
-    ${['designed', 'executed', 'automated', 'hours'].map(k => `<td><input type="number" class="w-s" id="ac-${r.id}-${k}" data-ac="${r.id}" data-k="${k}" value="${r[k] ?? 0}" min="0" step="any"></td>`).join('')}
-    <td><input type="text" class="w-l" id="ac-${r.id}-notes" data-ac="${r.id}" data-k="notes" value="${esc(r.notes || '')}" placeholder="Blockers, changes"></td>
-    <td class="r num">${pct(r.pct)}</td><td class="r num">${r.plannedPct == null ? '—' : pct(r.plannedPct)}</td>
-    <td><button class="btn ghost" data-act="rm-ac" data-id="${r.id}">Remove</button></td></tr>`).join('');
+  const weeks = T.rows.map(r => r.week);
+  if (!weeks.includes(S.trWeek)) S.trWeek = weeks[weeks.length - 1] || null;
   const L = T.last;
   const spiState = T.spi == null ? null : T.spi >= 0.97 ? 'ok' : T.spi >= 0.85 ? 'risk' : 'no';
   const kpis = `<div class="kpis">
     <div class="kpi"><span class="lbl">Completed</span><span class="v">${L ? pct(L.pct) : '—'}</span><span class="small muted">weighted by effort</span></div>
     <div class="kpi"><span class="lbl">Planned by now</span><span class="v">${L && L.plannedPct != null ? pct(L.plannedPct) : '—'}</span><span class="small muted">${L ? 'end of week of ' + fd(L.week) : 'log a week to compare'}</span></div>
-    <div class="kpi"><span class="lbl">Schedule index</span><span class="v">${T.spi == null ? '—' : T.spi.toFixed(2)}</span>${spiState ? pill(spiState, spiState === 'ok' ? 'On track' : spiState === 'risk' ? 'Slipping' : 'Behind') : '<span class="small muted">once planned work starts</span>'}</div>
+    <div class="kpi"><span class="lbl">Schedule index</span><span class="v">${T.spi == null ? '—' : T.spi.toFixed(2)}</span>${spiState ? pill(spiState, ST_LABEL[spiState]) : '<span class="small muted">once planned work starts</span>'}</div>
     <div class="kpi"><span class="lbl">Earned h per logged h</span><span class="v">${T.eff == null ? '—' : T.eff.toFixed(2)}</span><span class="small muted">above 1 means faster than estimated</span></div>
     <div class="kpi"><span class="lbl">Forecast finish</span><span class="v" style="font-size:17px">${T.forecast ? fd(T.forecast) : '—'}</span><span class="small muted">plan: ${T.end ? fd(T.end) : '—'}</span></div>
   </div>`;
+  const rows = T.rows.map(r => {
+    const sp = r.plannedPct > 0 ? r.pct / r.plannedPct : null, st = sp == null ? null : sp >= 0.97 ? 'ok' : sp >= 0.85 ? 'risk' : 'no';
+    return `<tr class="${r.week === S.trWeek ? 'sel' : ''}"><td>${fd(r.week)}</td><td class="r num">${n0(r.designed)}</td><td class="r num">${n0(r.automated)}</td><td class="r num">${n0(r.executed)}</td><td class="r num">${n0(r.hours)}</td>
+      <td class="r num">${pct(r.pct)}</td><td class="r num">${r.plannedPct == null ? '—' : pct(r.plannedPct)}</td><td>${st ? pill(st, ST_LABEL[st]) : ''}</td>
+      <td class="r"><button class="btn" data-act="tr-edit" data-id="${r.id}">${r.week === S.trWeek ? 'Editing' : 'Edit'}</button> <button class="btn ghost" data-act="rm-ac" data-id="${r.id}">Remove</button></td></tr>`;
+  }).join('');
+  const R = S.trWeek ? E.weekReport(P, S.actuals, A.sched, S.trWeek) : null;
   return `<section class="panel">
     <div class="panel-head"><h2>Weekly actuals</h2><button class="btn primary" data-act="add-week">Log next week</button></div>
-    <p class="small muted">Enter what was finished each week. Completion is weighted by the estimated hours of each item: a designed test case is worth ${nf1.format(T.designPerTC)} h, a manual execution ${nf1.format(T.execPerRun)} h and an automated test case ${nf1.format(T.autoPerTC)} h. The plan line follows the Schedule tab: setup and framework first, then design, scripting and execution.</p>
+    <p class="small muted">Log what each module finished every week. Completion is weighted by the estimated hours of each item, module by module. The plan comes from the Schedule tab.</p>
     ${kpis}
-    <div class="tbl-wrap"><table><thead><tr><th>Week starting</th><th>Test cases designed</th><th>Manual executions</th><th>Test cases automated</th><th>Hours logged</th><th>Notes</th><th class="r">Done</th><th class="r">Plan</th><th></th></tr></thead>
+    <div class="tbl-wrap"><table><thead><tr><th>Week starting</th><th class="r">Designed</th><th class="r">Automated</th><th class="r">Manual executions</th><th class="r">Hours</th><th class="r">Done</th><th class="r">Plan</th><th>Status</th><th></th></tr></thead>
       <tbody>${rows || `<tr><td colspan="9" class="muted">No weeks logged yet. Select “Log next week” to add the first one.</td></tr>`}</tbody></table></div>
   </section>
+  ${R ? weekEditor(R) + moduleProgress(R) + mailPanel(R) : ''}
   <section class="panel"><div class="panel-head"><h2>Planned against actual completion</h2><div class="legend"><span><i style="background:var(--s1)"></i>Planned</span><span><i style="background:var(--s2)"></i>Actual</span></div></div>
     <div class="chart" id="burn-chart"></div></section>`;
 }
+
+function weekEditor(R) {
+  const r = S.actuals.find(x => x.week === R.week); if (!r) return '';
+  const mods = r.mods || {};
+  const cell = (m, k) => {
+    const [key, , pk, scopeK] = k;
+    if (!(m[scopeK] > 0)) return '<td class="muted">—</td>';
+    const v = (mods[m.id] || {})[key] || 0;
+    return `<td><input type="number" class="w-s" min="0" step="1" id="ac-${r.id}-${m.id}-${key}" data-ac="${r.id}" data-mod="${m.id}" data-k="${key}" value="${v}"><span class="plan-hint">plan ${n0(m.weekPlan[pk])}</span></td>`;
+  };
+  const hasMods = r.mods && Object.keys(r.mods).length;
+  const legacy = hasMods ? (r.mods._all || null) : ((+r.designed || 0) + (+r.automated || 0) + (+r.executed || 0) > 0 ? { designed: r.designed, automated: r.automated, executed: r.executed } : null);
+  return `<section class="panel">
+    <div class="panel-head"><h2>Week of ${fd(R.week)}${R.weekNo ? ` <span class="muted small">week ${R.weekNo}</span>` : ''}</h2>
+      <label class="row small">Week ${selWeek('tr-week-a')}</label></div>
+    <div class="tbl-wrap"><table><thead><tr><th>Module</th>${KINDS.map(k => `<th>${k[1]}</th>`).join('')}</tr></thead><tbody>
+      ${R.mods.map(m => `<tr><td>${esc(m.name)}</td>${KINDS.map(k => cell(m, k)).join('')}</tr>`).join('')}
+      ${legacy ? `<tr class="sub"><td>Not split by module <span class="small muted">(logged before modules)</span></td>${KINDS.map(([key]) => `<td><input type="number" class="w-s" min="0" step="1" id="ac-${r.id}-_all-${key}" data-ac="${r.id}" data-mod="_all" data-k="${key}" value="${legacy[key] || 0}"></td>`).join('')}</tr>` : ''}
+      <tr class="total"><td>This week</td>${KINDS.map(([key, , pk]) => `<td class="num">${n0(R.totals.week[key])} <span class="plan-hint">plan ${n0(R.thisPlan ? R.thisPlan.total[pk] : 0)}</span></td>`).join('')}</tr>
+    </tbody></table></div>
+    <div class="fields">
+      <label class="field"><span class="lbl">Hours logged by the team</span><input type="number" min="0" step="any" id="ac-${r.id}-hours" data-ac="${r.id}" data-k="hours" value="${+r.hours || 0}"><span class="hint">Used for productivity (earned h per logged h)</span></label>
+    </div>
+    <div class="grid2">
+      <label class="field"><span class="lbl">Highlights this week</span><textarea rows="4" id="ac-${r.id}-notes" data-ac="${r.id}" data-k="notes" placeholder="One per line, e.g. Login and payments flows automated">${esc(r.notes || '')}</textarea></label>
+      <label class="field"><span class="lbl">Blockers and risks</span><textarea rows="4" id="ac-${r.id}-blockers" data-ac="${r.id}" data-k="blockers" placeholder="One per line, e.g. Test environment down Tuesday to Thursday">${esc(r.blockers || '')}</textarea></label>
+    </div>
+  </section>`;
+}
+
+function selWeek(id) {
+  return `<select id="${id}" data-act-change="tr-week">${S.T.rows.map(r => `<option value="${r.week}" ${r.week === S.trWeek ? 'selected' : ''}>${fd(r.week)}</option>`).join('')}</select>`;
+}
+
+function moduleProgress(R) {
+  const c = (m, key, pk, scopeK) => m[scopeK] > 0 ? `<td class="r num">${n0(m.act[key])} <span class="muted">/ ${n0(m.plan[pk])} / ${n0(m[scopeK])}</span></td>` : '<td class="r muted">—</td>';
+  return `<section class="panel"><div class="panel-head"><h2>Progress by module</h2><span class="small muted">to the end of week of ${fd(R.week)} · done / planned / total</span></div>
+    <div class="tbl-wrap"><table><thead><tr><th>Module</th>${KINDS.map(k => `<th class="r">${k[1]}</th>`).join('')}<th class="r">Done</th><th>Status</th></tr></thead><tbody>
+    ${R.mods.map(m => `<tr><td>${esc(m.name)}</td>${KINDS.map(([key, , pk, sk]) => c(m, key, pk, sk)).join('')}<td class="r num">${pct(m.pctDone)}</td><td>${pill(ST_PILL[m.status], ST_LABEL[m.status])}</td></tr>`).join('')}
+    </tbody></table></div></section>`;
+}
+
+/* ---------- Status email ---------- */
+const MAIL_COL = { ok: '#0a7d0a', risk: '#a36a00', no: '#b42f2f' };
+const MAIL_TD = 'border:1px solid #c9d1ce;padding:4px 8px;';
+const MAIL_TH = MAIL_TD + 'background:#eef2f0;text-align:left;font-weight:bold;';
+const mt = (head, rows, alignR = []) => `<table style="border-collapse:collapse;margin:4px 0 12px 0;font-size:10.5pt"><tr>${head.map((h, i) => `<th style="${MAIL_TH}${alignR.includes(i) ? 'text-align:right;' : ''}">${h}</th>`).join('')}</tr>${rows.map(r => `<tr>${r.map((c, i) => `<td style="${MAIL_TD}${alignR.includes(i) ? 'text-align:right;' : ''}">${c}</td>`).join('')}</tr>`).join('')}</table>`;
+const mh = t => `<p style="margin:14px 0 4px 0"><b>${t}</b></p>`;
+const mul = items => `<ul style="margin:2px 0 10px 0;padding-left:20px">${items.map(x => `<li>${x}</li>`).join('')}</ul>`;
+
+function mailModel(R, aud) {
+  const P = S.P, A = analysis(), M = summaryModel(A), internal = aud === 'internal';
+  const title = M.title || P.name || 'the project';
+  const label = ST_LABEL[R.status];
+  const subject = `${title}: weekly status, week of ${fd(R.week)} (${label})`;
+  const pl = R.row.plannedPct;
+  let reason = `${pct(R.row.pct)} complete against ${pl == null ? '—' : pct(pl)} planned`;
+  if (R.forecast) reason += `; forecast finish ${fd(R.forecast)}` + (P.end ? (R.late > 0 ? `, ${plural(R.late, 'day', 'days')} after the ${fd(P.end)} target` : `, within the ${fd(P.end)} target`) : '');
+  reason += '.';
+  const inScope = KINDS.filter(([, , , sk]) => R.mods.some(m => m[sk] > 0));
+  const scopeTot = { designed: R.totals.scope.design, automated: R.totals.scope.automate, executed: R.totals.scope.exec };
+  // risks
+  const risks = [];
+  R.mods.forEach(m => {
+    if (m.status === 'no') risks.push(`<b>${esc(m.name)}</b> is behind plan: ${pct(m.earnedP ? m.earnedA / m.earnedP : 0)} of the work planned by now is done.`);
+    else if (m.status === 'risk') risks.push(`<b>${esc(m.name)}</b> is slightly behind plan.`);
+  });
+  if (R.late > 0) risks.push(`At the current pace the finish moves to ${fd(R.forecast)}, ${plural(R.late, 'day', 'days')} after the target.`);
+  if (internal && R.eff != null && R.eff < 0.85) risks.push(`Productivity is ${R.eff.toFixed(2)} earned hours per logged hour, below the estimate.`);
+  lines(R.row.blockers).forEach(x => risks.push(esc(x)));
+  // next week
+  const nx = [];
+  const np = R.nextPlan ? R.nextPlan.total : null;
+  if (np) {
+    const parts = [['design', 'design'], ['script', 'automate'], ['exec', 'run']].filter(([k]) => np[k] >= 0.5).map(([k, v]) => `${v} about ${n0(np[k])}`);
+    if (parts.length) nx.push(`Planned: ${parts.join(', ')} test cases.`);
+    const top = R.mods.filter(m => m.next.design + m.next.script + m.next.exec >= 0.5).map(m => esc(m.name));
+    if (top.length) nx.push(`Focus: ${top.join(', ')}.`);
+  }
+  R.ms.forEach(m => nx.push(`${esc(m.label)}: ${fd(m.date)}.`));
+  const ns = E.addDays(R.week, 7), ne = E.addDays(R.week, 13);
+  const locs = [...new Set(P.team.map(r => r.location))];
+  const hol = P.holidays.filter(h => h.date >= ns && h.date <= ne && locs.includes(h.location) && P.a.workDays.includes(E.dow(h.date)));
+  if (hol.length) nx.push(`Public holiday${hol.length > 1 ? 's' : ''}: ${hol.map(h => `${esc(h.name)} (${esc(h.location)}, ${fd(h.date)})`).join('; ')}.`);
+  const leave = [];
+  P.team.forEach(r => {
+    let n = 0; for (let d = ns; d <= ne; d = E.addDays(d, 1)) if (P.a.workDays.includes(E.dow(d)) && (r.leaves || []).some(l => l.from && d >= l.from && d <= (l.to || l.from))) n++;
+    if (n) leave.push([r.name, n]);
+  });
+  if (leave.length) nx.push(internal ? `On leave: ${leave.map(([n, d]) => `${esc(n)} (${plural(d, 'day', 'days')})`).join(', ')}.` : `Planned leave: ${plural(leave.reduce((t, x) => t + x[1], 0), 'person-day', 'person-days')}.`);
+  return { title, subject, label, reason, inScope, scopeTot, risks, next: nx, highlights: lines(R.row.notes).map(esc), confirm: M.confirm.map(esc), internal, fte: M.fte };
+}
+
+function mailHTML(R, aud) {
+  const P = S.P, X = mailModel(R, aud);
+  const b = [];
+  b.push(`<p>Hi all,</p>`);
+  b.push(`<p>Here’s the weekly status for <b>${esc(X.title)}</b>${R.weekNo ? `, week ${R.weekNo}` : ''} (${fd(R.week)} to ${fd(R.weekEnd)}).</p>`);
+  b.push(`<p><b>Overall: <span style="color:${MAIL_COL[R.status]}">■ ${X.label}</span>.</b> ${X.reason}</p>`);
+  b.push(mh('Progress'));
+  b.push(mt(['', 'This week', 'Planned this week', 'To date', 'Planned to date', 'Total'],
+    X.inScope.map(([key, lab, pk]) => [lab, n0(R.totals.week[key]), n0(R.thisPlan ? R.thisPlan.total[pk] : 0), `<b>${n0(R.totals.toDate[key])}</b>`, n0(R.toPlan ? R.toPlan.total[pk] : 0), n0(X.scopeTot[key])]), [1, 2, 3, 4, 5]));
+  if (R.mods.length > 1 || X.internal) {
+    b.push(mh('By module'));
+    b.push(mt(['Module', ...X.inScope.map(k => k[1].replace('Test cases ', '').replace(/^./, c => c.toUpperCase())), 'Done', 'Status'],
+      R.mods.map(m => [esc(m.name), ...X.inScope.map(([key, , , sk]) => m[sk] > 0 ? `${n0(m.act[key])} of ${n0(m[sk])}` : '—'), pct(m.pctDone), m.status === 'notstarted' ? 'Not started' : `<span style="color:${MAIL_COL[ST_PILL[m.status] === 'ok' ? 'ok' : m.status] || '#444'}">■</span> ${ST_LABEL[m.status]}`]), [X.inScope.length + 1]));
+  }
+  if (X.highlights.length) { b.push(mh('Highlights')); b.push(mul(X.highlights)); }
+  b.push(mh('Risks and blockers'));
+  b.push(X.risks.length ? mul(X.risks) : '<p style="margin:2px 0 10px 0">No new risks or blockers this week.</p>');
+  if (X.next.length) { b.push(mh('Next week')); b.push(mul(X.next)); }
+  if (X.confirm.length) { b.push(mh(X.internal ? 'Open with the customer' : 'What we need from you')); b.push(mul(X.confirm)); }
+  if (X.internal) {
+    b.push(mh('Effort'));
+    b.push(mul([`Hours logged this week: ${n0(R.hoursWeek)} (to date ${n0(R.hoursToDate)}).`,
+      `Earned hours per logged hour: ${R.eff == null ? '—' : R.eff.toFixed(2)}.`,
+      `Schedule index: ${R.spi == null ? '—' : R.spi.toFixed(2)}. Planned finish ${R.plannedFinish ? fd(R.plannedFinish) : '—'}.`,
+      `Team: ${FTE(X.fte)} FTE.`]));
+  }
+  b.push(`<p>Regards,<br>${esc(P.notes.sender || 'Your name')}</p>`);
+  return `<div style="font-family:Calibri,Arial,sans-serif;font-size:11pt;color:#1f2a26">${b.join('')}</div>`;
+}
+
+function mailPanel(R) {
+  const aud = S.mailAud || 'client', key = R.week + '|' + aud;
+  const X = mailModel(R, aud);
+  const edited = S.mailEdits && S.mailEdits[key];
+  const html = edited || mailHTML(R, aud);
+  return `<section class="panel" id="mail-panel">
+    <div class="panel-head"><h2>Status email</h2>
+      <div class="row">
+        <label class="row small">Week ${selWeek('tr-week-b')}</label>
+        <div class="seg" role="group" aria-label="Audience">${[['client', 'Client'], ['internal', 'Internal']].map(([k, l]) => `<button class="${aud === k ? 'on' : ''}" data-act="mail-aud" data-k="${k}" aria-pressed="${aud === k}">${l}</button>`).join('')}</div>
+      </div></div>
+    <p class="small muted">${aud === 'client' ? 'Client version: progress, risks, next week and what you need from them. Hours and names on leave are left out.' : 'Internal version: adds hours, productivity, schedule index and who is on leave.'} You can edit the draft below before copying.</p>
+    <div class="fields">
+      <label class="field"><span class="lbl">Sign off as</span>${inp('notes.sender', 'text', '', 'placeholder="Your name"')}</label>
+    </div>
+    <div class="subject-row"><span class="lbl">Subject</span><input type="text" id="mail-subject" readonly value="${esc(X.subject)}"><button class="btn" data-act="mail-subject">Copy subject</button></div>
+    <div id="mail-preview" class="mail" contenteditable="true" spellcheck="true" data-key="${esc(key)}">${html}</div>
+    <div class="row">
+      <button class="btn primary" data-act="mail-copy">Copy email</button>
+      <button class="btn" data-act="mail-plain">Copy as plain text</button>
+      ${edited ? `<button class="btn" data-act="mail-reset">Undo my edits</button><span class="small muted">Edited. Changes to actuals won’t update this draft until you undo your edits.</span>` : ''}
+      ${S.mailNote ? `<span class="small" style="color:var(--good)">${esc(S.mailNote)}</span>` : ''}
+    </div>
+  </section>`;
+}
+
+document.addEventListener('input', ev => {
+  const el = ev.target;
+  if (el && el.id === 'mail-preview') { S.mailEdits = S.mailEdits || {}; S.mailEdits[el.dataset.key] = el.innerHTML; }
+});
+
+function flashMail(t) { S.mailNote = t; renderAll(); clearTimeout(S.mailTimer); S.mailTimer = setTimeout(() => { S.mailNote = ''; if (S.tab === 'tracking') renderAll(); }, 3500); }
+function selectNode(el) { const r = document.createRange(); r.selectNodeContents(el); const s = window.getSelection(); s.removeAllRanges(); s.addRange(r); }
+async function copyMail(plain) {
+  const el = $('#mail-preview'); if (!el) return;
+  const html = el.innerHTML, text = el.innerText;
+  try {
+    if (plain) { await navigator.clipboard.writeText(text); }
+    else {
+      if (typeof ClipboardItem === 'undefined' || !navigator.clipboard.write) throw new Error('no rich clipboard');
+      await navigator.clipboard.write([new ClipboardItem({ 'text/html': new Blob([html], { type: 'text/html' }), 'text/plain': new Blob([text], { type: 'text/plain' }) })]);
+    }
+    flashMail(plain ? 'Copied as plain text.' : 'Copied. Paste into Outlook or Teams.');
+  } catch (e) {
+    selectNode(el);
+    let ok = false; try { ok = document.execCommand('copy'); } catch (e2) { }
+    if (ok) flashMail('Copied. Paste into Outlook or Teams.');
+    else { S.mailNote = 'Copying isn’t available here. The draft is selected: press Ctrl+C (or ⌘C).'; renderAll(); selectNode($('#mail-preview')); }
+  }
+}
+async function copySubject() {
+  const el = $('#mail-subject'); if (!el) return;
+  try { await navigator.clipboard.writeText(el.value); flashMail('Subject copied.'); }
+  catch (e) { el.focus(); el.select(); let ok = false; try { ok = document.execCommand('copy'); } catch (e2) { } flashMail(ok ? 'Subject copied.' : 'Subject selected: press Ctrl+C.'); }
+}
+
 document.addEventListener('change', ev => {
-  const el = ev.target; if (!el.dataset || !el.dataset.ac) return;
+  const el = ev.target;
+  if (el.dataset && el.dataset.actChange === 'tr-week') { S.trWeek = el.value; renderAll(); return; }
+  if (!el.dataset || !el.dataset.ac) return;
   const r = S.actuals.find(x => x.id === el.dataset.ac); if (!r) return;
-  const k = el.dataset.k; const v = k === 'notes' ? el.value : Math.max(0, Number(el.value) || 0);
-  saveActual({ ...r, [k]: v });
+  const k = el.dataset.k;
+  if (k === 'notes' || k === 'blockers') return saveActual({ ...r, [k]: el.value });
+  const v = Math.max(0, Number(el.value) || 0);
+  if (!el.dataset.mod) return saveActual({ ...r, [k]: v });
+  let mods = JSON.parse(JSON.stringify(r.mods || {}));
+  if (!Object.keys(mods).length && ((+r.designed || 0) + (+r.automated || 0) + (+r.executed || 0) > 0)) mods._all = { designed: +r.designed || 0, automated: +r.automated || 0, executed: +r.executed || 0 };
+  (mods[el.dataset.mod] || (mods[el.dataset.mod] = {}))[k] = v;
+  const sum = key => Object.values(mods).reduce((t, m) => t + (+m[key] || 0), 0);
+  saveActual({ ...r, mods, designed: sum('designed'), automated: sum('automated'), executed: sum('executed') });
 });
 
 /* ---------- charts ---------- */
@@ -784,8 +982,15 @@ function drawCapChart() {
 function drawBurnChart() {
   const T = S.T, el = $('#burn-chart'); if (!el || !T) return;
   if (!T.plan) { el.innerHTML = '<p class="small muted">Add team members and a start date to see the plan.</p>'; return; }
-  const step = Math.max(1, Math.floor(T.plan.length / 160));
-  const plan = T.plan.filter((p, i) => i % step === 0 || i === T.plan.length - 1).map(p => [p[0], p[1] * 100]);
+  let plan;
+  const pw = T.sched && T.sched._planByWeek;
+  if (pw && T.sched.weekStart) {
+    plan = [[S.P.start, 0], ...Object.keys(pw).map(Number).sort((x, y) => x - y).map(w => [E.addDays(T.sched.weekStart, w * 7 + 6), pw[w] * 100])];
+    if (T.end) plan = plan.filter(x => x[0] <= E.addDays(T.end, 6));
+  } else {
+    const step = Math.max(1, Math.floor(T.plan.length / 160));
+    plan = T.plan.filter((p, i) => i % step === 0 || i === T.plan.length - 1).map(p => [p[0], p[1] * 100]);
+  }
   const act = T.rows.map(r => [E.addDays(r.week, 6), r.pct * 100]);
   const refX = []; if (S.P.end) refX.push({ date: S.P.end, label: 'Target', anchor: 'end' });
   if (T.forecast) refX.push({ date: T.forecast, label: 'Forecast', dy: 14 });
@@ -1081,10 +1286,17 @@ document.addEventListener('click', ev => {
     case 'add-week': {
       const weeks = S.actuals.map(x => x.week).sort();
       const wk = weeks.length ? E.addDays(weeks[weeks.length - 1], 7) : E.mondayOf(P.start);
-      saveActual({ id: wk, week: wk, designed: 0, executed: 0, automated: 0, hours: 0, notes: '' });
+      S.trWeek = wk;
+      saveActual({ id: wk, week: wk, designed: 0, executed: 0, automated: 0, hours: 0, notes: '', blockers: '', mods: {} });
       break;
     }
     case 'rm-ac': deleteActual(b.dataset.id); break;
+    case 'tr-edit': S.trWeek = (S.actuals.find(x => x.id === b.dataset.id) || {}).week; renderAll(); break;
+    case 'mail-aud': S.mailAud = b.dataset.k; renderAll(); break;
+    case 'mail-copy': copyMail(false); break;
+    case 'mail-plain': copyMail(true); break;
+    case 'mail-subject': copySubject(); break;
+    case 'mail-reset': { const el = $('#mail-preview'); if (el && S.mailEdits) delete S.mailEdits[el.dataset.key]; renderAll(); break; }
   }
 });
 document.addEventListener('change', ev => {
@@ -1147,7 +1359,9 @@ async function exportXlsx() {
       ...P.team.flatMap((r, k) => Object.entries(sc.people[k].weeks).sort((x, y) => +x[0] - +y[0]).map(([w, v]) => [r.name, E.addDays(sc.weekStart, +w * 7), ...CAT_ORDER.map(c => r1(v.cats[c] || 0)), r1(v.idle), v.off]))], [24, 12]);
   }
   add('Calendar', [['Date', 'Holiday', 'Location'], ...P.holidays.slice().sort((x, y) => x.date < y.date ? -1 : 1).map(h => [h.date, h.name, h.location]), [], ['Blocked from', 'To', 'Impact %', 'Reason'], ...P.downtimes.map(d => [d.from, d.to, d.impact, d.reason])], [14, 30, 12, 30]);
-  if (S.actuals.length) { const T = E.tracking(P, S.actuals, A.sched); add('Actuals', [['Week starting', 'Designed', 'Manual executions', 'Automated', 'Hours logged', 'Notes', 'Done %', 'Planned %'], ...T.rows.map(r => [r.week, r.designed, r.executed, r.automated, r.hours, r.notes || '', r1(r.pct * 100), r.plannedPct == null ? '' : r1(r.plannedPct * 100)])], [14, 10, 16, 10, 12, 30, 10, 10]); }
+  if (S.actuals.length) { const T = E.tracking(P, S.actuals, A.sched); add('Actuals', [['Week starting', 'Designed', 'Manual executions', 'Automated', 'Hours logged', 'Highlights', 'Blockers', 'Done %', 'Planned %'], ...T.rows.map(r => [r.week, r.designed, r.executed, r.automated, r.hours, r.notes || '', r.blockers || '', r1(r.pct * 100), r.plannedPct == null ? '' : r1(r.plannedPct * 100)])], [14, 10, 16, 10, 12, 30, 30, 10, 10]);
+    const mn = id => id === '_all' ? 'Not split by module' : ((P.modules.find(m => m.id === id) || {}).name || id);
+    add('Actuals by module', [['Week starting', 'Module', 'Designed', 'Automated', 'Manual executions'], ...T.rows.flatMap(r => Object.entries(r.mods || {}).map(([id, v]) => [r.week, mn(id), +v.designed || 0, +v.automated || 0, +v.executed || 0]))], [14, 28, 10, 10, 16]); }
   const buf = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
   const fname = (P.name || 'estimate').replace(/[^\w\- ]+/g, '').trim().slice(0, 60) + ' - estimate.xlsx';
   try { await S.dl.save({ filename: fname, data: new Blob([buf]) }); }

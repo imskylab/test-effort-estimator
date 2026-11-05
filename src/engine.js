@@ -121,7 +121,7 @@ const ENGINE = (() => {
       team: [newResource(1)],
       holidays: defaultHolidays(),
       downtimes: [],
-      notes: { drivers: '', excluded: '', confirm: '' },
+      notes: { drivers: '', excluded: '', confirm: '', sender: '' },
       a: defaults()
     };
   }
@@ -150,7 +150,7 @@ const ENGINE = (() => {
     P.team.forEach(r => r.leaves = r.leaves || []);
     // v1.5: CI/CD is new, existing or not needed
     if (P.a.cicdExists != null) { if (P.a.cicdMode === 'new' && P.a.cicdExists) P.a.cicdMode = 'existing'; delete P.a.cicdExists; }
-    P.notes = Object.assign({ drivers: '', excluded: '', confirm: '' }, P.notes || {});
+    P.notes = Object.assign({ drivers: '', excluded: '', confirm: '', sender: '' }, P.notes || {});
     return P;
   }
 
@@ -402,6 +402,8 @@ const ENGINE = (() => {
     } : null;
     const wk0 = mondayOf(start);
     const weekOf = d => Math.floor(daysBetween(wk0, d) / 7);
+    const getW = w => R.weeks[w] || (R.weeks[w] = { start: addDays(wk0, w * 7), design: 0, script: 0, exec: 0, runsH: 0, cats: {}, idle: 0, cap: 0, mods: {} });
+    const wm = (w, m, k, u) => { const x = getW(w).mods; (x[m.id] || (x[m.id] = { design: 0, script: 0, exec: 0 }))[k] += u; };
     const row = (key, label, cat, mod, d, h, w) => {
       let r = R.rows[key];
       if (!r) r = R.rows[key] = { key, label, cat, mod, first: d, last: d, hours: 0, weeks: {} };
@@ -446,7 +448,7 @@ const ENGINE = (() => {
           const t = Math.min(h, availH); h -= t; apply(t);
           if (rec) {
             const pw = R.people[k].weeks[w]; pw.cats[cat] = (pw.cats[cat] || 0) + t; R.work += t;
-            const W = R.weeks[w] || (R.weeks[w] = { start: addDays(wk0, w * 7), design: 0, script: 0, exec: 0, runsH: 0, cats: {}, idle: 0, cap: 0 });
+            const W = getW(w);
             W.cats[cat] = (W.cats[cat] || 0) + t;
             if (m) row(m.id + ':' + cat, null, cat, m.id, d, t, w);
             else row(cat, null, cat, null, d, t, w);
@@ -467,14 +469,14 @@ const ENGINE = (() => {
           if (cicdRem <= EPS) mark('cicdDone', d, 'CI/CD pipeline ready, regression runs start');
         }
         const doDesign = () => { for (const m of M) if (m.avail && m.design && h > EPS) take('design', (m.N - m.designed) * m.dH, t => {
-          const u = t / m.dH; m.designed += u; if (rec) day.design += u;
+          const u = t / m.dH; m.designed += u; if (rec) { day.design += u; wm(w, m, 'design', u); }
           const last = m.rq[m.rq.length - 1], at = wi + reviewDays;
           if (last && last[0] === at) last[1] += u; else m.rq.push([at, u]);
         }, m); };
-        const doScript = () => { if (!accessOK || !gateOK) return; for (const m of M) if (m.avail && m.auto && h > EPS) take('script', (m.reviewed * m.af - m.scripted) * m.sH, t => { const u = t / m.sH; m.scripted += u; if (rec) day.script += u; }, m); };
+        const doScript = () => { if (!accessOK || !gateOK) return; for (const m of M) if (m.avail && m.auto && h > EPS) take('script', (m.reviewed * m.af - m.scripted) * m.sH, t => { const u = t / m.sH; m.scripted += u; if (rec) { day.script += u; wm(w, m, 'script', u); } }, m); };
         const doExec = () => { if (!accessOK) return; for (const m of M) if (m.avail && m.exec) for (let c = 0; c < m.cyc && h > EPS; c++) {
           const av = c === 0 ? m.reviewed - m.ex[0] : (wi >= m.ready[c] ? m.N - m.ex[c] : 0);
-          take('exec', av * m.xH, t => { const u = t / m.xH; m.ex[c] += u; if (rec) day.exec += u; }, m);
+          take('exec', av * m.xH, t => { const u = t / m.xH; m.ex[c] += u; if (rec) { day.exec += u; wm(w, m, 'exec', u); } }, m);
         } };
         const doRuns = () => { if (!accessOK || !runsOK) return; for (const m of M) if (m.avail && m.auto && h > EPS) take('runs', m.scripted * m.rH - m.runDone, t => { m.runDone += t; }, m); };
         if (canM && canA) { doDesign(); doRuns(); doScript(); doExec(); }
@@ -484,7 +486,7 @@ const ENGINE = (() => {
         if (rec && h > EPS) { R.people[k].weeks[w].idle += h; R.idle += h; R.weeks[w] && (R.weeks[w].idle += h); }
       }
       if (rec) {
-        const W = R.weeks[w] || (R.weeks[w] = { start: addDays(wk0, w * 7), design: 0, script: 0, exec: 0, runsH: 0, cats: {}, idle: 0, cap: 0 });
+        const W = getW(w);
         W.design += day.design; W.script += day.script; W.exec += day.exec; W.days = (W.days || 0) + 1;
         R.cum.design += day.design; R.cum.script += day.script; R.cum.exec += day.exec;
         R.curve.push([d, R.cum.design, R.cum.script, R.cum.exec]);
@@ -570,61 +572,169 @@ const ENGINE = (() => {
     return out;
   }
 
-  /* ---------- Tracking ---------- */
+  /* ---------- Tracking ----------
+   * Weekly actuals: { week, hours, notes, blockers, mods: { <moduleId>: { designed, automated, executed } } }.
+   * Older weeks may only carry project totals (designed, automated, executed); those are earned
+   * at project-average weights. Earned hours use the estimate without contingency.
+   */
   function trackWeights(p) {
     const e = effort(p), a = p.a, cyc = Math.max(0, Math.round(+a.manualCycles || 0));
     let dN = 0, xN = 0;
-    e.mods.forEach((m, i) => { const pm = p.modules[i]; if (pm.design) dN += m.tcs; if (pm.manualExec) xN += m.tcs * cyc; });
+    const mods = p.modules.map((pm, i) => {
+      const m = e.mods[i];
+      const designN = pm.design ? m.tcs : 0, runs = pm.manualExec ? m.tcs * cyc : 0;
+      dN += designN; xN += runs;
+      return {
+        id: pm.id, name: pm.name, designN, autoN: m.autoTCs, runs,
+        wD: designN ? m.design / designN : 0, wX: runs ? m.exec / runs : 0,
+        wA: m.autoTCs ? (m.script + m.review + m.maint + m.autoExec) / m.autoTCs : 0
+      };
+    });
     return {
-      e, V: e.variable || 1,
+      e, V: e.variable || 1, mods,
       wD: dN ? e.lines.design / dN : 0,
       wX: xN ? e.lines.exec / xN : 0,
       wA: e.autoTCs ? (e.lines.script + e.lines.review + e.lines.maint + e.lines.autoExec) / e.autoTCs : 0
     };
   }
+  // Per-module counts in a week row; legacy totals go under '_all'.
+  function rowMods(r) {
+    if (r.mods && Object.keys(r.mods).length) return r.mods;
+    if ((+r.designed || 0) + (+r.executed || 0) + (+r.automated || 0) > 0) return { _all: { designed: +r.designed || 0, executed: +r.executed || 0, automated: +r.automated || 0 } };
+    return {};
+  }
+  function rowEarned(W, r) {
+    let h = 0;
+    Object.entries(rowMods(r)).forEach(([id, v]) => {
+      const w = W.mods.find(m => m.id === id) || W;
+      h += (+v.designed || 0) * w.wD + (+v.executed || 0) * w.wX + (+v.automated || 0) * w.wA;
+    });
+    return h;
+  }
   function tracking(p, actuals, sched) {
     const W = trackWeights(p);
     const sorted = actuals.slice().sort((x, y) => x.week < y.week ? -1 : 1);
-    let cumD = 0, cumX = 0, cumA = 0, cumH = 0;
+    let cumD = 0, cumX = 0, cumA = 0, cumH = 0, earned = 0;
     const rows = sorted.map(r => {
-      cumD += +r.designed || 0; cumX += +r.executed || 0; cumA += +r.automated || 0; cumH += +r.hours || 0;
-      const earned = cumD * W.wD + cumX * W.wX + cumA * W.wA;
-      return { ...r, cumD, cumX, cumA, cumH, earned, pct: Math.min(1, earned / W.V) };
+      const M = rowMods(r);
+      const t = Object.values(M).reduce((s, v) => ({ d: s.d + (+v.designed || 0), x: s.x + (+v.executed || 0), a: s.a + (+v.automated || 0) }), { d: 0, x: 0, a: 0 });
+      cumD += t.d; cumX += t.x; cumA += t.a; cumH += +r.hours || 0; earned += rowEarned(W, r);
+      return { ...r, designed: t.d, executed: t.x, automated: t.a, cumD, cumX, cumA, cumH, earned, pct: Math.min(1, earned / W.V) };
     });
     let plan = null, end = null;
-    if (p.team.length && p.start) {
-      const s = sched || schedule(p, {});
+    const s = (p.team.length && p.start) ? (sched || schedule(p, {})) : null;
+    if (s) {
       end = s.finish;
       if (s.curve) {
         plan = s.curve.map(([d, D, A, X]) => [d, Math.min(1, (D * W.wD + X * W.wX + A * W.wA) / W.V)]);
+        // per-module weights give a truer plan line when modules differ
+        if (s.weeks) {
+          const byWeek = {};
+          let cum = 0;
+          Object.keys(s.weeks).map(Number).sort((x, y) => x - y).forEach(w => {
+            Object.entries(s.weeks[w].mods || {}).forEach(([id, v]) => {
+              const mw = W.mods.find(m => m.id === id); if (!mw) return;
+              cum += v.design * mw.wD + v.exec * mw.wX + v.script * mw.wA;
+            });
+            byWeek[w] = Math.min(1, cum / W.V);
+          });
+          s._planByWeek = byWeek;
+        }
         if (end) plan = plan.filter(x => x[0] <= end);
       }
     }
-    const planAt = d => { if (!plan || !plan.length) return null; let v = 0; for (const [x, y] of plan) { if (x > d) break; v = y; } return v; };
-    rows.forEach(r => { r.plannedPct = planAt(addDays(r.week, 6)); });
+    const planAt = d => {
+      if (s && s._planByWeek && s.weekStart) { const w = Math.floor(daysBetween(s.weekStart, d) / 7); let v = 0; for (const k in s._planByWeek) if (+k <= w) v = Math.max(v, s._planByWeek[k]); return v; }
+      if (!plan || !plan.length) return null; let v = 0; for (const [x, y] of plan) { if (x > d) break; v = y; } return v;
+    };
+    rows.forEach(r => { r.plannedPct = plan ? planAt(addDays(r.week, 6)) : null; });
     const last = rows[rows.length - 1];
     let spi = null, eff = null, forecast = null;
     if (last && last.plannedPct > 0) {
       spi = last.pct / last.plannedPct;
       eff = last.cumH > 0 ? last.earned / last.cumH : null;
       if (spi > 0 && plan && plan.length) {
+        // Early weeks are a weak signal: lean the forecast towards the plan until about a quarter
+        // of the work is done, and never let pace extrapolate beyond 1.25x or below 0.3x.
+        const conf = Math.min(1, last.pct / 0.25);
+        const spiF = Math.min(1.25, Math.max(0.3, 1 + (spi - 1) * conf));
         const from = addDays(last.week, 6);
-        let cur = last.pct, prevY = last.plannedPct;
+        let cur = last.pct, prevY = planAt(from);
         for (const [d, y] of plan) {
           if (d <= from) continue;
-          cur += (y - prevY) * spi; prevY = y;
+          cur += Math.max(0, y - prevY) * spiF; prevY = Math.max(prevY, y);
           if (cur >= 0.9999) { forecast = d; break; }
         }
         if (!forecast) {
           const pe = plan[plan.length - 1][0], span = Math.max(1, daysBetween(p.start, pe));
-          forecast = addDays(pe > from ? pe : from, Math.ceil((1 - cur) * span / spi));
+          forecast = addDays(pe > from ? pe : from, Math.ceil((1 - cur) * span / spiF));
         }
       }
     }
-    return { rows, plan, end, spi, eff, forecast, last, designPerTC: W.wD, execPerRun: W.wX, autoPerTC: W.wA };
+    return { rows, plan, end, spi, eff, forecast, last, sched: s, W, designPerTC: W.wD, execPerRun: W.wX, autoPerTC: W.wA };
   }
 
-  return { defaults, defaultHolidays, newModule, newResource, newProject, migrate, effort, oneTimeBuckets, analyse, capacityIn, schedule, tracking,
+  // Everything a weekly status needs, as of the given logged week.
+  function weekReport(p, actuals, sched, week) {
+    const upto = actuals.filter(r => r.week <= week);
+    const T = tracking(p, upto, sched);
+    const row = T.rows.find(r => r.week === week);
+    if (!row) return null;
+    const s = T.sched, W = T.W;
+    const wIdx = s && s.weekStart ? Math.floor(daysBetween(s.weekStart, week) / 7) : null;
+    const planWeek = wi => {
+      const out = { total: { design: 0, script: 0, exec: 0 }, mods: {} };
+      const x = s && s.weeks && s.weeks[wi];
+      if (x) Object.entries(x.mods || {}).forEach(([id, v]) => { out.mods[id] = v; out.total.design += v.design; out.total.script += v.script; out.total.exec += v.exec; });
+      return out;
+    };
+    const planTo = wi => {
+      const out = { total: { design: 0, script: 0, exec: 0 }, mods: {} };
+      if (s && s.weeks) Object.keys(s.weeks).map(Number).filter(k => k <= wi).forEach(k => {
+        Object.entries(s.weeks[k].mods || {}).forEach(([id, v]) => {
+          const o = out.mods[id] || (out.mods[id] = { design: 0, script: 0, exec: 0 });
+          o.design += v.design; o.script += v.script; o.exec += v.exec;
+          out.total.design += v.design; out.total.script += v.script; out.total.exec += v.exec;
+        });
+      });
+      return out;
+    };
+    const thisPlan = wIdx != null ? planWeek(wIdx) : null, toPlan = wIdx != null ? planTo(wIdx) : null, nextPlan = wIdx != null ? planWeek(wIdx + 1) : null;
+    // actuals to date by module
+    const act = {}, wk = {};
+    upto.forEach(r => Object.entries(rowMods(r)).forEach(([id, v]) => {
+      const o = act[id] || (act[id] = { designed: 0, automated: 0, executed: 0 });
+      o.designed += +v.designed || 0; o.automated += +v.automated || 0; o.executed += +v.executed || 0;
+      if (r.week === week) wk[id] = { designed: +v.designed || 0, automated: +v.automated || 0, executed: +v.executed || 0 };
+    }));
+    const mods = W.mods.map(m => {
+      const a = act[m.id] || { designed: 0, automated: 0, executed: 0 };
+      const pl = (toPlan && toPlan.mods[m.id]) || { design: 0, script: 0, exec: 0 };
+      const earnedA = a.designed * m.wD + a.executed * m.wX + a.automated * m.wA;
+      const earnedP = pl.design * m.wD + pl.exec * m.wX + pl.script * m.wA;
+      const total = m.designN * m.wD + m.runs * m.wX + m.autoN * m.wA;
+      const spi = earnedP > 0.5 ? earnedA / earnedP : null;
+      const status = earnedP <= 0.5 ? (earnedA > 0 ? 'ahead' : 'notstarted') : spi >= 0.97 ? 'ok' : spi >= 0.85 ? 'risk' : 'no';
+      return { ...m, act: a, week: wk[m.id] || { designed: 0, automated: 0, executed: 0 }, plan: pl, weekPlan: (thisPlan && thisPlan.mods[m.id]) || { design: 0, script: 0, exec: 0 },
+        next: (nextPlan && nextPlan.mods[m.id]) || { design: 0, script: 0, exec: 0 }, earnedA, earnedP, total, pctDone: total ? Math.min(1, earnedA / total) : 0, spi, status };
+    });
+    const legacy = act._all || null;
+    const totals = {
+      scope: { design: W.mods.reduce((t, m) => t + m.designN, 0), automate: W.mods.reduce((t, m) => t + m.autoN, 0), exec: W.mods.reduce((t, m) => t + m.runs, 0) },
+      week: { designed: row.designed, automated: row.automated, executed: row.executed },
+      toDate: { designed: row.cumD, automated: row.cumA, executed: row.cumX }
+    };
+    const weekEnd = addDays(week, 6);
+    const ms = s && s.ms ? Object.entries(s.ms).filter(([k, v]) => !k.endsWith(':done') && v.date > weekEnd && v.date <= addDays(weekEnd, 14)).map(([k, v]) => v).sort((x, y) => x.date < y.date ? -1 : 1) : [];
+    let st = 'ok';
+    if (T.spi != null) st = T.spi >= 0.97 ? 'ok' : T.spi >= 0.85 ? 'risk' : 'no';
+    const late = p.end && T.forecast && T.forecast > p.end ? daysBetween(p.end, T.forecast) : 0;
+    if (late > 0) { const span = Math.max(1, daysBetween(p.start, p.end)); st = late / span > 0.1 ? 'no' : (st === 'ok' ? 'risk' : st); }
+    return { week, weekEnd, weekNo: wIdx != null ? wIdx + 1 : null, row, T, mods, legacy, totals, thisPlan, toPlan, nextPlan, ms, status: st, late,
+      hoursWeek: +row.hours || 0, hoursToDate: row.cumH, spi: T.spi, eff: T.eff, forecast: T.forecast, plannedFinish: T.end };
+  }
+
+  return { defaults, defaultHolidays, newModule, newResource, newProject, migrate, effort, oneTimeBuckets, analyse, capacityIn, schedule, tracking, weekReport,
     toS, toD, addDays, dow, mondayOf, daysBetween, uid, hireTeam, CATS };
 })();
 if (typeof module !== 'undefined' && module.exports) module.exports = ENGINE;
