@@ -1,13 +1,13 @@
 {
   "name": "test-effort-estimator",
-  "version": "1.6.0",
+  "version": "1.7.0",
   "description": "Estimates effort, finish date, team size and achievable scope for manual and automation test projects, and tracks weekly actuals.",
   "private": true,
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
     "build": "node scripts/build.js",
-    "test": "node --test test/engine.test.js"
+    "test": "node --test test/engine.test.js test/server.test.js"
   },
   "engines": {
     "node": ">=18"

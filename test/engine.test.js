@@ -229,3 +229,75 @@ test('falling far behind shows as behind with a later forecast', () => {
   assert.strictEqual(R.status, 'no');
   assert.ok(R.forecast > R.plannedFinish);
 });
+
+/* ---------- review fixes ---------- */
+test('worst case is not stacked on contingency', () => {
+  const p = project();
+  const e = E.effort(p);
+  assert.ok(Math.abs(e.worst - e.base * p.a.pertWorst) < 1e-6);
+  assert.ok(Math.abs(e.best - e.base * p.a.pertBest) < 1e-6);
+  assert.ok(e.worst < e.total * p.a.pertWorst);
+});
+
+test('bad inputs are guarded: negative counts, over 100% allocation, fractional cycles', () => {
+  const p = project();
+  p.a.manualCycles = 2.4;
+  const e = E.effort(p), s = E.schedule(p);
+  assert.ok(Math.abs(s.work - e.total) < 0.01, 'scheduled work matches costed work with fractional cycles');
+  p.modules[0].tcs = -50;
+  assert.strictEqual(E.effort(p).tcs, 0);
+  p.modules[0].tcs = 100; p.team[0].alloc = 500;
+  const c = E.capacityIn(p, p.team, p.start, '2026-11-20');
+  assert.ok(c.ded.gross <= 5 * 8 + 1e-6, 'allocation is capped at 100%');
+});
+
+test('setup and framework progress earns credit; actuals above scope do not', () => {
+  const p = trackedProject(); const [w] = p.modules.map(m => m.id);
+  const none = E.tracking(p, [{ week: '2026-11-16', hours: 100, mods: {} }]);
+  const fw = E.tracking(p, [{ week: '2026-11-16', hours: 100, mods: {}, ot: { framework: 50, setup: 100 } }]);
+  assert.strictEqual(none.rows[0].earned, 0);
+  assert.ok(fw.rows[0].earned > 0 && fw.eff > 0, 'framework weeks show productivity');
+  const ok = E.tracking(p, [{ week: '2026-11-16', hours: 100, mods: { [w]: { designed: 200 } } }]);
+  const over = E.tracking(p, [{ week: '2026-11-16', hours: 100, mods: { [w]: { designed: 900 } } }]);
+  assert.strictEqual(over.rows[0].earned, ok.rows[0].earned, 'only the scope counts');
+  const R = E.weekReport(p, [{ week: '2026-11-16', hours: 100, mods: { [w]: { designed: 900 } } }], null, '2026-11-16');
+  assert.ok(R.warnings.some(x => /scope/.test(x)));
+});
+
+test('a frozen baseline keeps status honest when the plan is edited', () => {
+  const p = trackedProject(); const [w] = p.modules.map(m => m.id);
+  const weeks = ['2026-11-16', '2026-11-23', '2026-11-30', '2026-12-07', '2026-12-14', '2026-12-21', '2026-12-28', '2027-01-04'];
+  const acts = weeks.map(week => ({ week, hours: 100, mods: { [w]: { designed: 4 } }, ot: { setup: 100, framework: 40 } }));
+  p.baseline = E.makeBaseline(p, E.schedule(p), 'agreed');
+  const before = E.tracking(p, acts).spi;
+  p.team = p.team.slice(0, 2); p.a.contingencyPct = 40; // re-plan: fewer people, more buffer
+  const after = E.tracking(p, acts).spi;
+  assert.ok(Math.abs(before - after) < 1e-9, 'status is measured against the baseline, not the edited plan');
+  const v = E.baselineVariance(p, E.schedule(p));
+  assert.ok(v.finishDays > 0 && v.effort > 0, 'the re-plan shows up as variance');
+});
+
+test('raw-pace forecast is reported alongside the smoothed one', () => {
+  const p = trackedProject(); const [w] = p.modules.map(m => m.id);
+  const weeks = ['2026-11-16', '2026-11-23', '2026-11-30', '2026-12-07', '2026-12-14', '2026-12-21'];
+  const acts = weeks.map(week => ({ week, hours: 100, mods: { [w]: { designed: 3 } } }));
+  const T = E.tracking(p, acts);
+  assert.ok(T.forecastRaw >= T.forecast, 'current pace is not softened');
+  const R = E.weekReport(p, acts, null, weeks[5]);
+  assert.strictEqual(R.forecast, T.forecastRaw);
+});
+
+test('calculated holidays: US observed dates and Good Friday', () => {
+  const h = E.generateHolidays(2027, 2027);
+  const has = (d, n, l) => h.some(x => x.date === d && x.name === n && x.location === l);
+  assert.ok(has('2027-07-05', 'Independence Day', 'USA'), 'July 4 on a Sunday is observed on Monday');
+  assert.ok(has('2027-11-25', 'Thanksgiving', 'USA'));
+  assert.ok(has('2027-03-26', 'Good Friday', 'India'));
+  assert.ok(has('2027-12-24', 'Christmas', 'USA'), 'Christmas on a Saturday is observed on Friday');
+});
+
+test('team time for pricing includes everyone booked, not just effort', () => {
+  const p = exampleTeam(project());
+  const A = E.analyse(p);
+  assert.ok(A.teamTime && A.teamTime.hours > A.e.total, `team time ${A.teamTime && A.teamTime.hours} vs effort ${A.e.total}`);
+});

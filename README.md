@@ -37,20 +37,36 @@ with the current team, how much fits by the target, how many people are needed),
 staffing recommendation, and breaks down effort, productive capacity (per FTE and for the
 team), key factors and what's driving the estimate. Add customer-facing notes (extra
 drivers, exclusions, open questions) at the bottom. "Copy summary" puts the whole summary
-on the clipboard as Markdown, ready for an email, Teams or Slack.
+on the clipboard as Markdown, ready for an email, Teams or Slack. The client version leaves
+out team time, the per-FTE capacity breakdown, hiring details and waiting time; the internal
+version adds "team time to price": the hours people are booked on the project, including
+leads, managers and waiting time, which is what gets priced (it is higher than the effort).
+
+The best and worst cases are applied to the base estimate; contingency is not stacked on top.
+
+## Baseline
+
+Once the estimate is agreed, freeze it as the baseline on the Tracking tab. Tracking, the
+forecast and status emails then measure against the baseline, and later changes to the plan
+show as variances (finish date, effort, scope). Re-baselining needs a reason and is kept in a
+history that the status email mentions.
 
 ## Tracking and status email
 
 Each week, log per module how many test cases were designed, automated and executed, plus
 team hours, highlights and blockers. Progress is earned at each module's own estimated hours
-and compared with the Schedule tab's weekly plan, giving a schedule index, a per-module status
-and a forecast finish (early weeks are damped towards the plan).
+and compared with the baseline (or the current plan if none is frozen), giving a schedule
+index, a per-module status and a forecast finish at the current pace (a smoothed forecast is
+shown next to it in early weeks). Setup, framework, common methods and CI/CD progress are
+logged as % complete, so those weeks count too. Counts above a module's scope are capped
+and flagged.
 
 The status email builds a draft for any logged week: overall status, this week vs plan,
 progress by module, highlights, risks and blockers, next week's plan, milestones, holidays and
 leave, and what's needed from the customer. Choose the client or internal version (internal
 adds hours, productivity and names on leave), edit the draft in place, then copy it formatted
-for Outlook or Teams, or as plain text.
+for Outlook or Teams, or as plain text. If the numbers change after you edit the draft,
+copying is paused until you refresh it or confirm your edits.
 
 ## Run it
 
@@ -66,21 +82,25 @@ Then open http://localhost:3000. Others on your network can use http://<this-mac
 
 Set these as environment variables before starting:
 
-| Variable     | Default   | What it does                                  |
-|--------------|-----------|-----------------------------------------------|
-| `PORT`       | `3000`    | Port to listen on                             |
-| `HOST`       | `0.0.0.0` | Use `127.0.0.1` to allow only this machine    |
-| `DATA_DIR`   | `./data`  | Where projects and actuals are saved          |
-| `BASIC_AUTH` | none      | `user:password` to require a login            |
+| Variable     | Default     | What it does                                                        |
+|--------------|-------------|---------------------------------------------------------------------|
+| `PORT`       | `3000`      | Port to listen on                                                   |
+| `HOST`       | `127.0.0.1` | This machine only. Use `0.0.0.0` to share on your network (needs a login) |
+| `BASIC_AUTH` | none        | Logins: `user:password`, or several as `alice:pw1,bob:pw2`          |
+| `USERS_FILE` | none        | Path to a JSON file of logins: `{ "alice": "pw1", "bob": "pw2" }`   |
+| `DATA_DIR`   | `./data`    | Where projects, actuals, backups and the audit log are saved        |
 
-Windows (PowerShell): `$env:PORT=8080; $env:BASIC_AUTH="team:secret"; npm start`
-macOS/Linux: `PORT=8080 BASIC_AUTH=team:secret npm start`
+The server refuses to share on the network without a login. Every change records who made
+it (`updatedBy` on the saved document, and one line per change in `data/audit.log`).
+
+Windows (PowerShell): `$env:HOST="0.0.0.0"; $env:BASIC_AUTH="alice:pw1,bob:pw2"; npm start`
+macOS/Linux: `HOST=0.0.0.0 BASIC_AUTH=alice:pw1,bob:pw2 npm start`
 
 ## Development
 
 ```
 npm run build   # rebuild public/index.html and dist/claude-artifact.html from src/
-npm test        # run the estimation engine tests
+npm test        # run the engine and server tests
 ```
 
 Edit files in `src/`, never `public/index.html` directly: the build overwrites it.
@@ -95,7 +115,7 @@ Edit files in `src/`, never `public/index.html` directly: the build overwrites i
 | `public/vendor/` | SheetJS 0.18.5 for Excel export. |
 | `server.js` | Zero-dependency Node server: static files plus a JSON document API. |
 | `scripts/build.js` | Assembles the two builds. |
-| `test/` | Engine tests (`node --test`). |
+| `test/` | Engine and server tests (`node --test`). |
 
 The same `src/` code also runs as a claude.ai artifact, where storage and downloads come
 from the artifact platform instead of `public/store.js`. `dist/claude-artifact.html` is
@@ -126,8 +146,11 @@ For HTTPS, put it behind your usual reverse proxy (IIS, nginx).
 
 ## Notes
 
-- Several people can edit at once. Changes from others appear within about 4 seconds.
-  If two people edit the same project at the same moment, the last save wins.
+- Several people can work at once. Changes from others appear within about 4 seconds.
+  If two people change the same project's plan at the same time, the second to save is
+  told and chooses whose version to keep; nothing is overwritten silently. Weekly actuals
+  are saved field by field, so people logging different modules don't collide.
+- The server checks the shape of saved projects and actuals and rejects bad data.
 - Basic auth sends the password with every request, so use HTTPS if the server is
   reachable outside a trusted network.
 - The page loads its fonts from Google Fonts; without internet it falls back to system fonts.

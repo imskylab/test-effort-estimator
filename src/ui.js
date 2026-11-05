@@ -27,28 +27,51 @@ function touch() {
 async function saveNow() {
   if (!S.P || !S.id) return;
   if (S.local || !S.db) { S.saving = S.local ? 'Not saved (offline view)' : ''; const l = S.list.find(x => x.id === S.id); if (l) { l.name = S.P.name; l.client = S.P.client; } renderHeader(); return; }
-  S.rev = E.uid();
+  if (S.conflict) { S.saving = 'Not saved: choose a version first'; renderHeader(); return; }
+  const ref = S.db.doc('projects/' + S.id);
   S.saving = 'Saving…'; renderHeader();
   try {
-    await S.db.doc('projects/' + S.id).set({ name: S.P.name, client: S.P.client || '', updatedAt: Date.now(), rev: S.rev, data: JSON.parse(JSON.stringify(S.P)) });
-    S.saving = 'Saved';
+    // Has anyone saved since we loaded? (The self-hosted server also checks this atomically.)
+    const cur = await ref.get();
+    if (cur.exists && cur.data().rev && S.rev && cur.data().rev !== S.rev) return setConflict(cur.data());
+    const rev = E.uid();
+    S.pendingRev = rev;
+    const body = { name: S.P.name, client: S.P.client || '', updatedAt: Date.now(), rev, data: JSON.parse(JSON.stringify(S.P)) };
+    if (S.rev) body.prevRev = S.rev;
+    await ref.set(body);
+    S.rev = rev; S.saving = 'Saved';
   } catch (e) {
-    S.saving = e.code === 'invalid_argument' ? 'Read-only: you can view but not save' : e.code === 'quota_exceeded' ? 'Storage full: delete old projects' : 'Save failed, will retry on next edit';
+    if (e.code === 'conflict') { S.pendingRev = null; return setConflict(e.current); }
+    S.saving = e.code === 'invalid_argument' ? (e.message && !/^invalid/.test(e.message) ? 'Not saved: ' + e.message : 'Read-only: you can view but not save') : e.code === 'quota_exceeded' ? 'Storage full: delete old projects' : 'Save failed, will retry on next edit';
   }
+  S.pendingRev = null;
   renderHeader();
+}
+function setConflict(theirs) {
+  S.conflict = { theirs, by: theirs && theirs.updatedBy, at: theirs && theirs.updatedAt };
+  S.saving = 'Not saved';
+  renderAll();
+}
+function conflictBanner() {
+  const c = S.conflict; if (!c) return '';
+  const when = c.at ? new Date(c.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
+  return `<div class="banner conflict" role="alert"><b>${esc(c.by || 'Someone else')} saved this project${when ? ' at ' + when : ''} while you had unsaved changes.</b> Your changes aren’t saved yet. Choose which version to keep:
+    <div class="row" style="margin-top:8px"><button class="btn" data-act="conflict-theirs">Load their version (discard mine)</button><button class="btn danger" data-act="conflict-mine">Keep mine (overwrite theirs)</button></div></div>`;
 }
 function openProject(id) {
   if (S.unsubA) { S.unsubA(); S.unsubA = null; }
   S.id = id; S.A = null; S.confirmDel = false; S.actuals = [];
   const l = S.list.find(x => x.id === id);
-  S.P = l && l.data ? migrate(JSON.parse(JSON.stringify(l.data))) : null;
+  S.loadError = ''; S.conflict = null;
+  try { S.P = l && l.data ? migrate(JSON.parse(JSON.stringify(l.data))) : null; }
+  catch (e) { S.P = null; S.loadError = `“${(l && l.name) || 'This project'}” couldn’t be opened because its saved data is damaged. Pick another project, or restore it from the backups folder on the server.`; }
   S.rev = l ? l.rev : null;
   try { localStorage.setItem('tee.last', id); } catch (e) { }
   if (S.db && !S.local) {
     S.unsubA = S.db.collection('projects/' + id + '/actuals').onSnapshot(snap => {
       S.actuals = snap.docs.map(d => ({ id: d.id, ...d.data() }));
       if (S.tab === 'tracking') renderSoon();
-    }, () => { });
+    }, err => { S.saving = 'Weekly actuals couldn’t be loaded' + (err && err.message ? ': ' + err.message : ''); renderHeader(); });
   } else {
     S.actuals = (S.localActuals && S.localActuals[id]) || [];
   }
@@ -88,12 +111,22 @@ async function deleteProject() {
   S.id = null; S.P = null;
   if (S.list.length) openProject(S.list[0].id); else renderAll();
 }
-async function saveActual(row) {
-  const i = S.actuals.findIndex(x => x.id === row.id);
-  if (i >= 0) S.actuals[i] = row; else S.actuals.push(row);
+function deepMerge(t, p) { for (const [k, v] of Object.entries(p)) { if (v && typeof v === 'object' && !Array.isArray(v) && t[k] && typeof t[k] === 'object') deepMerge(t[k], v); else t[k] = v; } return t; }
+async function createActual(row) {
+  if (!S.actuals.find(x => x.id === row.id)) S.actuals.push(row);
   if (S.db && !S.local) {
     const { id, ...body } = row;
-    try { await S.db.doc('projects/' + S.id + '/actuals/' + id).set(body); } catch (e) { S.saving = 'Couldn’t save actuals'; renderHeader(); }
+    try { await S.db.doc('projects/' + S.id + '/actuals/' + id).set(body); } catch (e) { S.saving = 'Couldn’t save the week' + (e.message ? ': ' + e.message : ''); renderHeader(); }
+  } else { S.localActuals = S.localActuals || {}; S.localActuals[S.id] = S.actuals; }
+  renderSoon();
+}
+// Save only the fields that changed, so two people logging different modules don't overwrite each other.
+async function patchActual(id, patch) {
+  const r = S.actuals.find(x => x.id === id); if (!r) return;
+  deepMerge(r, JSON.parse(JSON.stringify(patch)));
+  if (S.db && !S.local) {
+    try { await S.db.doc('projects/' + S.id + '/actuals/' + id).update(patch); }
+    catch (e) { S.saving = 'Couldn’t save actuals' + (e.message ? ': ' + e.message : ''); renderHeader(); }
   } else { S.localActuals = S.localActuals || {}; S.localActuals[S.id] = S.actuals; }
   renderSoon();
 }
@@ -136,7 +169,11 @@ const fid = path => 'f-' + path.replace(/[^a-z0-9]/gi, '-');
 function inp(path, type = 'text', cls = '', attrs = '') {
   const v = getPath(S.P, path);
   if (type === 'check') return `<input type="checkbox" id="${fid(path)}" data-p="${path}" data-t="check" ${v ? 'checked' : ''} ${attrs}>`;
-  if (type === 'num') return `<input type="number" id="${fid(path)}" data-p="${path}" data-t="num" class="${cls}" value="${v ?? ''}" step="any" ${attrs}>`;
+  if (type === 'num') {
+    const whole = /(\.tcs|manualCycles|autoCycles|priority|Days|MaxPeople|rampDays|leadSpan|managerAbove)$/.test(path);
+    const min = /min=/.test(attrs) ? '' : 'min="0"';
+    return `<input type="number" id="${fid(path)}" data-p="${path}" data-t="num" class="${cls}" value="${v ?? ''}" step="${whole ? 1 : 'any'}" ${min} ${attrs}>`;
+  }
   return `<input type="${type}" id="${fid(path)}" data-p="${path}" class="${cls}" value="${esc(v)}" ${attrs}>`;
 }
 function sel(path, options, cls = '') {
@@ -146,7 +183,14 @@ function sel(path, options, cls = '') {
 document.addEventListener('change', ev => {
   const el = ev.target; const path = el.dataset && el.dataset.p; if (!path || !S.P) return;
   let v = el.value;
-  if (el.dataset.t === 'num') { v = el.value === '' ? 0 : Number(el.value); if (!isFinite(v)) v = 0; }
+  if (el.dataset.t === 'num') {
+    v = el.value === '' ? 0 : Number(el.value); if (!isFinite(v)) v = 0;
+    const lo = el.min === '' ? -Infinity : +el.min, hi = el.max === '' ? Infinity : +el.max;
+    const before = v;
+    v = Math.min(hi, Math.max(lo, v));
+    if (el.step === '1') v = Math.round(v);
+    if (v !== before) { el.value = v; S.saving = `Adjusted to ${v} (allowed ${isFinite(lo) ? lo : ''}–${isFinite(hi) ? hi : 'any'})`; }
+  }
   if (el.dataset.t === 'check') v = el.checked;
   setPath(S.P, path, v);
   touch();
@@ -180,6 +224,7 @@ document.addEventListener('change', ev => { if (ev.target.id === 'proj-pick') op
 
 function renderMain() {
   const m = $('#main');
+  if (!S.P && S.loadError) { m.innerHTML = `<div class="empty panel"><h1>Project can’t be opened</h1><p class="muted" style="max-width:60ch">${esc(S.loadError)}</p><div class="row" style="justify-content:center"><button class="btn primary" data-act="new">New project</button></div></div>`; return; }
   if (!S.P) {
     m.innerHTML = S.loading ? `<div class="empty"><p class="muted">Loading projects…</p></div>` : `
       <div class="empty panel">
@@ -191,7 +236,7 @@ function renderMain() {
     return;
   }
   const tabs = { summary: viewSummary, schedule: viewSchedule, scope: viewScope, team: viewTeam, calendar: viewCalendar, factors: viewFactors, tracking: viewTracking };
-  m.innerHTML = (S.local ? `<div class="banner">Saving isn’t available in this view, so changes last only until you close the page.</div>` : '') + (S.tab !== 'summary' && S.tab !== 'tracking' && S.tab !== 'schedule' ? strip() : '') + tabs[S.tab]();
+  m.innerHTML = conflictBanner() + (S.local ? `<div class="banner">Saving isn’t available in this view, so changes last only until you close the page.</div>` : '') + (S.tab !== 'summary' && S.tab !== 'tracking' && S.tab !== 'schedule' ? strip() : '') + tabs[S.tab]();
   if (S.tab === 'summary') drawCapChart();
   if (S.tab === 'schedule') { drawGantt(); drawHeat(); }
   if (S.tab === 'tracking') drawBurnChart();
@@ -241,20 +286,20 @@ function summaryModel(A) {
   let ov = `${tc} test cases (${auto} automated) across ${plural(P.modules.length, 'module', 'modules')}, starting ${fd(P.start)}`;
   if (P.end) ov += `, to be delivered in ${calDays(P.start, P.end)} calendar days (${workDaysBetween(P, P.start, P.end)} working days), by ${fd(P.end)}`;
   ov += `. It assumes ${fwText}${e.autoTCs > 0 ? ({ existing: ', hooked into the existing CI/CD pipeline', none: ', with no CI/CD pipeline work', new: ', with a new CI/CD pipeline' }[a.cicdMode] || '') : ''}.`;
-  M.title = [P.client, P.name].filter(Boolean).join(' ');
+  M.title = P.client && P.name && !P.name.toLowerCase().includes(P.client.toLowerCase()) ? `${P.name} for ${P.client}` : (P.name || P.client || '');
   M.overview = ov;
 
   // questions
   const teamTxt = `${FTE(fte)} FTE`;
   if (A.hasTeam && fl) {
     const d = calDays(P.start, fl), diff = P.end ? E.daysBetween(P.end, fl) : null;
-    M.q.push({ key: 'duration', q: `With the current team of ${teamTxt}, how long do all ${tc} take?`,
+    M.q.push({ key: 'duration', q: `With the current team of ${teamTxt}, how long will all ${tc} test cases take?`,
       big: `${nf0.format(d)} calendar days`,
       sub: `Finishes ${fd(fl)} (${nf0.format(A.finish.likely.workdays)} working days)${diff == null ? '' : diff > 0 ? `, ${plural(diff, 'day', 'days')} more than planned` : diff < 0 ? `, ${plural(-diff, 'day', 'days')} less than planned` : ', on the target date'}.`,
       chips: [`Best ${A.finish.best.date ? fd(A.finish.best.date) : '—'}`, `Worst ${A.finish.worst.date ? fd(A.finish.worst.date) : 'over 3 years'}`],
       text: `About **${nf0.format(d)} calendar days**${diff == null ? `, finishing ${fd(fl)}` : diff > 0 ? `, roughly ${plural(diff, 'day', 'days')} more than planned` : diff < 0 ? `, roughly ${plural(-diff, 'day', 'days')} less than planned` : ', on the target date'}` });
   } else if (A.hasTeam) {
-    M.q.push({ key: 'duration', q: `With the current team of ${teamTxt}, how long do all ${tc} take?`, big: 'Not reachable',
+    M.q.push({ key: 'duration', q: `With the current team of ${teamTxt}, how long will all ${tc} test cases take?`, big: 'Not reachable',
       sub: A.missing.length ? missingMsg(A.missing) : 'Not within 3 years. Add people or reduce scope.', text: 'Not reachable with the current team' });
   } else {
     M.q.push({ key: 'duration', q: 'How long will the current team take?', big: 'Add a team', sub: 'Needs at least one person on the Team tab.', muted: true });
@@ -272,7 +317,7 @@ function summaryModel(A) {
     M.q.push({ key: 'scope', q: 'How much is done by the target?', big: 'Set a target date', sub: 'Needed to work out achievable scope.', muted: true });
   }
   if (A.need) {
-    const n = A.need, item = { key: 'need', q: `How many people to finish all ${tc} by the target?` };
+    const n = A.need, item = { key: 'need', q: `How many people are needed to finish all ${tc} test cases by the target?` };
     if (n.extra == null) Object.assign(item, { big: 'Not possible by the target', sub: `More people don’t help enough: framework, reviews, build gaps and module availability set a minimum duration.${n.floor ? ` Even with 256 more people the earliest finish is ${fd(n.floor)}.` : ''}`, text: 'Not possible by adding people' });
     else if (n.extra === 0) Object.assign(item, { big: `${teamTxt} is enough`, sub: A.needWorst && A.needWorst.extra ? `Add ${plural(A.needWorst.extra, 'engineer', 'engineers')} to cover the worst case.` : 'Covers the worst case too.', text: `**${teamTxt}**, the current team is enough` });
     else {
@@ -280,7 +325,8 @@ function summaryModel(A) {
       const extras = [n.needLeads ? `+${plural(n.needLeads, 'lead', 'leads')}` : '', n.needMgr ? `+1 manager at ${a.managerAlloc}%` : ''].filter(Boolean);
       Object.assign(item, { big: `${FTE(tot)} FTE`, sub: `${A.hasTeam ? `+${plural(n.extra, 'engineer', 'engineers')} on top of the current team` : plural(n.extra, 'engineer', 'engineers')}, based in ${esc(loc)}, ${esc(a.hireSkill.toLowerCase())}, full-time from day 1.${A.needWorst && A.needWorst.extra != null && A.needWorst.extra > n.extra ? ` Worst case: +${A.needWorst.extra}.` : ''}`,
         chips: [...n.heads.map(h => `${h.n} × ${h.level}`), ...extras],
-        text: `**${FTE(tot)} FTE** (+${plural(n.extra, 'engineer', 'engineers')}, ${loc})${extras.length ? ', plus ' + extras.join(', ').replace(/\+/g, '') : ''}` });
+        text: `**${FTE(tot)} FTE** (+${plural(n.extra, 'engineer', 'engineers')}, ${loc})${extras.length ? ', plus ' + extras.join(', ').replace(/\+/g, '') : ''}`,
+        textClient: `**${FTE(tot)} FTE** (+${plural(n.extra, 'engineer', 'engineers')})` });
     }
     M.q.push(item);
   } else if (!P.end) {
@@ -310,7 +356,8 @@ function summaryModel(A) {
     ['Automation scripting, including review and maintenance', L.script + L.review + L.maint], ['Regression runs and failure analysis', L.autoExec],
     ...ph('end'), [`Contingency (${a.contingencyPct}%)`, L.contingency]
   ].filter(x => x[1] > 0.01);
-  M.total = e.total; M.best = e.total * a.pertBest; M.worst = e.total * a.pertWorst;
+  M.total = e.total; M.best = e.best; M.worst = e.worst;
+  M.teamTime = A.teamTime || null; M.needTeamTime = A.need && A.need.teamTime || null;
 
   // capacity
   const w = A.window;
@@ -341,7 +388,7 @@ function summaryModel(A) {
     ['Automation framework', (FW_STATUS.find(x => x[0] === a.frameworkStatus) || FW_STATUS[0])[1]],
     ['CI/CD pipeline', (CICD_MODES.find(x => x[0] === a.cicdMode) || CICD_MODES[0])[1]],
     ...(P.modules.some(m => m.manualExec) ? [['Manual execution', `${plural(cyc, 'cycle', 'cycles')}, ${a.retestPct}% retest`]] : []),
-    ['Best / worst case', `${pct(a.pertBest - 1).replace('-', '−')} / +${pct(a.pertWorst - 1)} of likely`]
+    ['Best / worst case', `${pct(a.pertBest - 1).replace('-', '−')} / +${pct(a.pertWorst - 1)} of the base estimate (contingency not added on top)`]
   ];
 
   // drivers
@@ -367,7 +414,7 @@ function summaryModel(A) {
     if (ready) dr.push(`**${lead}:** framework and common methods take about ${H(fwH)} h, so scripting starts ${fd(ready.date)}, about ${plural(Math.max(1, Math.round(calDays(P.start, ready.date) / 7)), 'week', 'weeks')} in.`);
   }
   P.modules.filter(m => m.availableFrom && m.availableFrom > P.start).forEach(m => dr.push(`**${m.name}** isn’t available until ${fd(m.availableFrom)}.`));
-  if (A.sched && A.sched.work > 0) { const idle = A.sched.idle / (A.sched.work + A.sched.idle); if (idle >= 0.1) dr.push(`**Waiting time:** ${pct(idle)} of productive time is spent waiting for work (framework, reviews, module availability or skills).`); }
+  if (A.sched && A.sched.work > 0) { const idle = A.sched.idle / (A.sched.work + A.sched.idle); if (idle >= 0.1) dr.push(`**internal**Waiting time:** ${pct(idle)} of productive time is spent waiting for work (framework, reviews, module availability or skills).`); }
   M.drivers = [...dr, ...lines(P.notes.drivers).map(x => /[.!?]$/.test(x) ? x : x + '.')];
   M.excluded = lines(P.notes.excluded);
   M.confirm = lines(P.notes.confirm);
@@ -376,33 +423,40 @@ function summaryModel(A) {
 
 const md2html = t => esc(t).replace(/\*\*(.+?)\*\*/g, '<b>$1</b>');
 
-function summaryMarkdown(A) {
-  const M = summaryModel(A), P = S.P;
+function summaryMarkdown(A, aud) {
+  const M = summaryModel(A), P = S.P, client = aud !== 'internal';
+  const drivers = M.drivers.filter(x => !client || !x.startsWith('**internal**')).map(x => x.replace('**internal**', '**'));
   const out = [];
   out.push(`Here's the summary of the ${M.title || 'test automation'} estimate. It's for ${M.overview}`);
   if (M.q.filter(q => q.text).length) {
     out.push('', '**Estimates**', '', '| Question | Answer |', '|---|---|');
-    M.q.filter(q => q.text).forEach(q => out.push(`| ${q.q} | ${q.text} |`));
+    M.q.filter(q => q.text).forEach(q => out.push(`| ${q.q} | ${client && q.textClient ? q.textClient : q.text} |`));
   }
   out.push('', `**Where the effort goes: about ${r10(M.total)} hours** (range ${r10(M.best)} to ${r10(M.worst)})`, '', '| Activity | Hours |', '|---|---|');
   M.effort.forEach(([n, h]) => out.push(`| ${n} | ${H(h)} |`));
   out.push(`| **Total** | **${H(M.total)}** |`);
-  if (M.cap) {
+  if (!client && M.teamTime) {
+    out.push('', `**Team time to price:** about ${r10(M.teamTime.hours)} hours (${FTE(M.teamTime.fte)} FTE for ${M.teamTime.workdays} working days, to ${fd(M.teamTime.until)}). This is the time people are booked on the project, including leads, managers and time waiting on dependencies, so it's higher than the effort above.`);
+    if (M.needTeamTime) out.push(`With the recommended team: about ${r10(M.needTeamTime.hours)} hours (${FTE(M.needTeamTime.fte)} FTE for ${M.needTeamTime.workdays} working days).`);
+  }
+  if (M.cap && !client) {
     out.push('', `**Productive capacity, ${fd(P.start)} to ${fd(M.capUntil)}**`, '', `| | Per FTE | Team of ${FTE(M.fte)} FTE |`, '|---|---|---|');
     M.cap.forEach(([n, h], i) => out.push(`| ${n} | ${i ? (h > 0 ? '+' : '−') : ''}${H(Math.abs(h / M.fte))} | ${i ? (h > 0 ? '+' : '−') : ''}${H(Math.abs(h))} |`));
     out.push(`| **Productive hours** | **${H(M.capTotal / M.fte)} (${pct(M.capPct)})** | **${H(M.capTotal)}** |`);
+  } else if (M.cap) {
+    out.push('', `**Capacity:** about ${pct(M.capPct)} of the team's working hours go into project work, after public holidays, leave, meetings, downtime and ramp-up.`);
   }
   out.push('', '**Key factors**', '', '| Factor | Value |', '|---|---|');
   M.factors.forEach(([n, v]) => out.push(`| ${n} | ${v} |`));
-  if (M.drivers.length) out.push('', '**What\'s driving it**', '', ...M.drivers.map(x => `- ${x}`));
+  if (drivers.length) out.push('', '**What\'s driving it**', '', ...drivers.map(x => `- ${x}`));
   if (M.excluded.length) out.push('', '**Not included**', '', ...M.excluded.map(x => `- ${x}`));
   if (M.confirm.length) out.push('', '**To confirm with the customer**', '', ...M.confirm.map((x, i) => `${i + 1}. ${x}`));
-  if (M.rec) out.push('', `**Recommendation:** ${M.rec}`);
+  if (M.rec) out.push('', `**Recommendation:** ${client ? M.rec.replace(/ \(\+\d+ engineers?, [^)]*\)/, '') : M.rec}`);
   return out.join('\n');
 }
 
 async function copySummary() {
-  const text = summaryMarkdown(analysis());
+  const text = summaryMarkdown(analysis(), S.sumAud || 'client');
   try {
     if (!navigator.clipboard || !navigator.clipboard.writeText) throw new Error('no clipboard');
     await navigator.clipboard.writeText(text);
@@ -440,8 +494,10 @@ function viewSummary() {
     <thead><tr><th>Activity</th><th class="r">Hours</th><th class="r">Person-days</th><th class="r">Share</th></tr></thead><tbody>
     ${M.effort.map(([n, h]) => `<tr><td>${esc(n)}</td><td class="r num">${H(h)}</td><td class="r num">${PD(h)}</td><td class="r num">${pct(h / e.total)}</td></tr>`).join('')}
     <tr class="total"><td>Total (likely)</td><td class="r num">${H(e.total)}</td><td class="r num">${PD(e.total)}</td><td class="r num">100%</td></tr>
-    <tr class="sub"><td>Best case (×${a.pertBest})</td><td class="r num">${H(M.best)}</td><td class="r num">${PD(M.best)}</td><td></td></tr>
-    <tr class="sub"><td>Worst case (×${a.pertWorst})</td><td class="r num">${H(M.worst)}</td><td class="r num">${PD(M.worst)}</td><td></td></tr>
+    <tr class="sub"><td>Best case (base estimate ×${a.pertBest})</td><td class="r num">${H(M.best)}</td><td class="r num">${PD(M.best)}</td><td></td></tr>
+    <tr class="sub"><td>Worst case (base estimate ×${a.pertWorst}, no contingency on top)</td><td class="r num">${H(M.worst)}</td><td class="r num">${PD(M.worst)}</td><td></td></tr>
+    ${M.teamTime ? `<tr class="total"><td>Team time to price <span class="small muted">(${FTE(M.teamTime.fte)} FTE × ${M.teamTime.workdays} working days, incl. leads and waiting)</span></td><td class="r num">${H(M.teamTime.hours)}</td><td class="r num">${PD(M.teamTime.hours)}</td><td class="r num">${pct(M.teamTime.hours / e.total)}</td></tr>` : ''}
+    ${M.needTeamTime ? `<tr class="sub"><td>Team time with the recommended ${FTE(M.needTeamTime.fte)} FTE</td><td class="r num">${H(M.needTeamTime.hours)}</td><td class="r num">${PD(M.needTeamTime.hours)}</td><td></td></tr>` : ''}
     <tr class="sub"><td>PERT expected (B + 4L + W) ÷ 6</td><td class="r num">${H(A.expectedTotal)}</td><td class="r num">${PD(A.expectedTotal)}</td><td></td></tr>
     </tbody></table></div>`;
 
@@ -478,7 +534,8 @@ function viewSummary() {
     </div>
   </section>
   <section class="panel overview">
-    <div class="panel-head"><h2>${esc(M.title || 'Estimate')}</h2><div class="row">${S.copyNote ? `<span class="small" style="color:var(--good)">${S.copyNote}</span>` : ''}<button class="btn primary" data-act="copy-summary">Copy summary</button></div></div>
+    <div class="panel-head"><h2>${esc(M.title || 'Estimate')}</h2><div class="row">${S.copyNote ? `<span class="small" style="color:var(--good)">${S.copyNote}</span>` : ''}<div class="seg" role="group" aria-label="Summary audience">${[['client', 'Client'], ['internal', 'Internal']].map(([k, l]) => `<button class="${(S.sumAud || 'client') === k ? 'on' : ''}" data-act="sum-aud" data-k="${k}" aria-pressed="${(S.sumAud || 'client') === k}">${l}</button>`).join('')}</div><button class="btn primary" data-act="copy-summary">Copy summary</button></div></div>
+    <p class="small muted">${(S.sumAud || 'client') === 'client' ? 'Client version: leaves out team time, the capacity breakdown, hiring details and waiting time.' : 'Internal version: adds team time for pricing, the capacity breakdown per FTE and hiring details.'}</p>
     <p class="lead">${esc(M.overview)}</p>
     ${S.copyFallback ? `<div class="note">Copying isn’t available here. The text is selected below: press Ctrl+C (or ⌘C) to copy it.<textarea id="copy-fallback" rows="10" readonly style="margin-top:8px">${esc(S.copyFallback)}</textarea><div style="margin-top:6px"><button class="btn" data-act="copy-close">Close</button></div></div>` : ''}
   </section>
@@ -490,7 +547,7 @@ function viewSummary() {
     <section class="panel"><div class="panel-head"><h2>Where the effort goes</h2><span class="small muted">about ${r10(M.total)} h, range ${r10(M.best)} to ${r10(M.worst)}</span></div>${effortTbl}</section>
     <div style="display:grid;gap:18px;align-content:start;min-width:0">
       <section class="panel"><h2>Key factors</h2><div class="tbl-wrap"><table><tbody>${M.factors.map(([n, v]) => `<tr><td class="muted">${esc(n)}</td><td>${esc(v)}</td></tr>`).join('')}</tbody></table></div></section>
-      <section class="panel"><h2>What’s driving it</h2>${M.drivers.length ? `<ul class="bul">${M.drivers.map(x => `<li>${md2html(x)}</li>`).join('')}</ul>` : '<p class="muted small">Nothing stands out yet.</p>'}</section>
+      <section class="panel"><h2>What’s driving it</h2>${M.drivers.length ? `<ul class="bul">${M.drivers.map(x => `<li>${md2html(x.replace('**internal**', '**'))}</li>`).join('')}</ul>` : '<p class="muted small">Nothing stands out yet.</p>'}</section>
     </div>
   </div>
   ${capBlock}
@@ -591,7 +648,23 @@ function viewCalendar() {
     <div class="row">${P.locations.map((l, i) => `<span class="row" style="gap:4px">${inp(`locations.${i}`, 'text', 'w-m')}<button class="btn ghost" data-act="rm-loc" data-i="${i}" ${P.locations.length < 2 ? 'disabled' : ''}>Remove</button></span>`).join('')}</div>
     <p class="small muted">Each location has its own holiday list below. People follow the holidays of their location.</p></section>
   <section class="panel"><div class="panel-head"><h2>Public holidays</h2><button class="btn" data-act="add-hol">Add holiday</button></div>
-    <p class="note">The list starts with sample national holidays for India and US federal holidays. Replace them with your company’s holiday calendar for each location. Holidays on non-working days have no effect.</p>
+    <p class="note">New projects start with the holidays that can be calculated: US federal holidays, India’s national days and Good Friday. Festival holidays that move every year (Holi, Eid, Dussehra, Diwali and others) aren’t included, so paste your company’s holiday list below. Holidays on non-working days have no effect.</p>
+    <details class="howto" ${S.holOpen ? 'open' : ''}><summary>Add holidays in bulk</summary>
+      <div class="grid2" style="margin-top:10px">
+        <div class="field"><span class="lbl">Paste from your company list</span>
+          <textarea id="hol-paste" rows="6" placeholder="One per line: date, name, location&#10;2027-03-22, Holi, India&#10;29/10/2027, Diwali, India"></textarea>
+          <span class="hint">Dates as YYYY-MM-DD or DD/MM/YYYY. Location is optional and defaults to the one selected.</span>
+          <div class="row"><label class="row small">Default location ${`<select id="hol-loc">${P.locations.map(l => `<option>${esc(l)}</option>`).join('')}</select>`}</label><button class="btn" data-act="hol-import">Add pasted holidays</button></div>
+          ${S.holNote ? `<span class="small">${esc(S.holNote)}</span>` : ''}
+        </div>
+        <div class="field"><span class="lbl">Add calculated holidays</span>
+          <div class="row"><select id="hol-gen-loc">${['India', 'USA'].filter(l => P.locations.includes(l)).map(l => `<option>${l}</option>`).join('')}</select>
+          <select id="hol-gen-year">${[0, 1, 2, 3].map(k => +P.start.slice(0, 4) + k).map(y => `<option>${y}</option>`).join('')}</select>
+          <button class="btn" data-act="hol-gen">Add</button></div>
+          <span class="hint">US federal holidays (observed dates), or India’s Republic Day, Independence Day, Gandhi Jayanti, Good Friday, Christmas and New Year. Skips dates already listed.</span>
+        </div>
+      </div>
+    </details>
     <div class="tbl-wrap"><table><thead><tr><th>Date</th><th>Holiday</th><th>Location</th><th></th></tr></thead><tbody>
     ${hol.map(({ h, i }) => `<tr><td>${inp(`holidays.${i}.date`, 'date')}</td><td>${inp(`holidays.${i}.name`, 'text', 'w-l')}</td><td>${sel(`holidays.${i}.location`, P.locations)}</td><td><button class="btn ghost" data-act="rm-hol" data-i="${i}">Remove</button></td></tr>`).join('') || `<tr><td colspan="4" class="muted">No holidays listed.</td></tr>`}
     </tbody></table></div></section>
@@ -605,7 +678,7 @@ function viewCalendar() {
 /* ---------- Factors ---------- */
 function viewFactors() {
   const P = S.P, a = P.a;
-  const f = (path, label, hint) => `<label class="field"><span class="lbl">${label}</span>${inp(path, 'num')}${hint ? `<span class="hint">${hint}</span>` : ''}</label>`;
+  const f = (path, label, hint) => `<label class="field"><span class="lbl">${label}</span>${inp(path, 'num', '', /%/.test(label) ? 'max="100"' : '')}${hint ? `<span class="hint">${hint}</span>` : ''}</label>`;
   return `<p class="note">Defaults follow common industry ranges for functional test automation. Replace them with your own historical numbers as you collect them. Every change applies to this project only.</p>
   <section class="panel"><h2>Hours per test case</h2>
     <div class="tbl-wrap"><table><thead><tr><th>Level</th><th>Typical test case</th><th>Design h</th><th>Manual run h</th><th>Automation h</th></tr></thead><tbody>
@@ -671,7 +744,7 @@ function viewFactors() {
     ${(() => { const pm = E.oneTimeBuckets(P).items.find(x => x.id === 'per-module'); return pm ? `<tr class="sub"><td></td><td class="muted">${esc(pm.name)}</td><td></td><td class="muted">Common methods</td><td class="r num">${H(pm.hours)}</td><td></td></tr>` : ''; })()}
     </tbody></table></div></section>
   <section class="panel"><h2>Risk range</h2>
-    <div class="fields">${f('a.contingencyPct', 'Contingency buffer %', 'Added to the likely estimate')}${f('a.pertBest', 'Best case multiplier')}${f('a.pertWorst', 'Worst case multiplier')}</div>
+    <div class="fields">${f('a.contingencyPct', 'Contingency buffer %', 'Added to the likely estimate')}${f('a.pertBest', 'Best case multiplier', 'Applied to the base estimate, without contingency')}${f('a.pertWorst', 'Worst case multiplier', 'Applied to the base estimate; contingency isn’t added on top')}</div>
     <p class="small muted">The status turns “At risk” when the likely finish is before the target but the worst-case finish isn’t.</p></section>
   <section class="panel"><h2>Team sizing</h2><p class="small muted">Used when the estimator works out how many people to add.</p>
     <div class="fields">
@@ -690,7 +763,33 @@ function viewFactors() {
 const ST_LABEL = { ok: 'On track', risk: 'At risk', no: 'Behind', ahead: 'Ahead', notstarted: 'Not started' };
 const ST_PILL = { ok: 'ok', risk: 'risk', no: 'no', ahead: 'ok', notstarted: 'na' };
 const KINDS = [['designed', 'Test cases designed', 'design', 'designN'], ['automated', 'Test cases automated', 'script', 'autoN'], ['executed', 'Manual executions', 'exec', 'runs']];
+const OT_LABEL = { setup: 'Onboarding and setup', framework: 'Framework development', common: 'Common methods', cicd: 'CI/CD and reporting', close: 'Closure and handover' };
 const n0 = v => nf0.format(Math.round(v || 0));
+
+function baselinePanel(A) {
+  const P = S.P, b = P.baseline, hist = P.baselineHistory || [];
+  const canFreeze = A.sched && A.sched.finish;
+  const freezeForm = (label, cancel) => `<div class="row" style="align-items:flex-end">
+      <label class="field" style="flex:1;min-width:240px"><span class="lbl">${b ? 'Reason for re-baselining' : 'Note (optional)'}</span><input type="text" id="baseline-reason" placeholder="${b ? 'Required, e.g. Customer added the Mobile module (CR-12)' : 'e.g. Estimate approved by customer on 12 Nov'}"></label>
+      <button class="btn primary" data-act="baseline-freeze" ${canFreeze ? '' : 'disabled'}>${label}</button>${cancel ? '<button class="btn" data-act="baseline-cancel">Cancel</button>' : ''}</div>
+      ${S.baselineNote ? `<span class="small" style="color:var(--bad)">${esc(S.baselineNote)}</span>` : ''}`;
+  if (!b) return `<section class="panel"><div class="panel-head"><h2>Baseline</h2>${pill('na', 'Not frozen')}</div>
+    <p class="small muted">Freeze the plan once the estimate is agreed with the customer. Tracking and status emails then measure against it, and later changes to the plan show up as variances instead of quietly moving the goalposts. Until then, progress is compared with the current plan.</p>
+    ${canFreeze ? freezeForm('Freeze baseline', false) : '<p class="small muted">The plan needs a finish date first: add a team and a start date.</p>'}</section>`;
+  const v = E.baselineVariance(P, A.sched);
+  const chips = [];
+  if (v.finishDays) chips.push(`<span class="chip ${v.finishDays > 0 ? 'chip-bad' : 'chip-good'}">Current plan finishes ${Math.abs(v.finishDays)} days ${v.finishDays > 0 ? 'later' : 'earlier'}</span>`);
+  if (Math.abs(v.effort) >= 1) chips.push(`<span class="chip">${v.effort > 0 ? '+' : '−'}${H(Math.abs(v.effort))} h effort</span>`);
+  if (Math.abs(v.tcs) >= 0.5) chips.push(`<span class="chip">${v.tcs > 0 ? '+' : '−'}${n0(Math.abs(v.tcs))} test cases</span>`);
+  if (v.endChanged) chips.push(`<span class="chip">Target date changed (was ${fd(b.end)})</span>`);
+  return `<section class="panel"><div class="panel-head"><h2>Baseline</h2>${pill('ok', 'Frozen ' + fd(b.at))}</div>
+    <p>Progress is measured against the baseline frozen on <b>${fd(b.at)}</b>${b.reason ? ` (${esc(b.reason)})` : ''}: finish ${fd(b.finish)}, ${H(b.total)} h, ${n0(b.tcs)} test cases (${n0(b.autoTCs)} automated).</p>
+    ${chips.length ? `<div class="chips"><span class="small muted">Since then:</span>${chips.join('')}</div>` : '<p class="small muted">The current plan matches the baseline.</p>'}
+    ${S.rebaseline ? freezeForm('Freeze new baseline', true) : `<div><button class="btn" data-act="baseline-start">Re-baseline…</button></div>`}
+    ${hist.length > 1 ? `<details class="howto"><summary>Baseline history (${hist.length})</summary><div class="tbl-wrap" style="margin-top:8px"><table><thead><tr><th>Frozen</th><th>Reason</th><th class="r">Finish</th><th class="r">Effort h</th><th class="r">Test cases</th></tr></thead><tbody>
+      ${hist.slice().reverse().map(h => `<tr><td>${fd(h.at)}</td><td>${esc(h.reason || '—')}</td><td class="r num">${fd(h.finish)}</td><td class="r num">${H(h.total)}</td><td class="r num">${n0(h.tcs)}</td></tr>`).join('')}</tbody></table></div></details>` : ''}
+  </section>`;
+}
 
 function viewTracking() {
   const P = S.P, A = analysis(), T = E.tracking(P, S.actuals, A.sched);
@@ -699,12 +798,13 @@ function viewTracking() {
   if (!weeks.includes(S.trWeek)) S.trWeek = weeks[weeks.length - 1] || null;
   const L = T.last;
   const spiState = T.spi == null ? null : T.spi >= 0.97 ? 'ok' : T.spi >= 0.85 ? 'risk' : 'no';
+  const planLbl = T.baseline ? 'baseline' : 'current plan';
   const kpis = `<div class="kpis">
-    <div class="kpi"><span class="lbl">Completed</span><span class="v">${L ? pct(L.pct) : '—'}</span><span class="small muted">weighted by effort</span></div>
-    <div class="kpi"><span class="lbl">Planned by now</span><span class="v">${L && L.plannedPct != null ? pct(L.plannedPct) : '—'}</span><span class="small muted">${L ? 'end of week of ' + fd(L.week) : 'log a week to compare'}</span></div>
+    <div class="kpi"><span class="lbl">Completed</span><span class="v">${L ? pct(L.pct) : '—'}</span><span class="small muted">weighted by effort, incl. setup and framework</span></div>
+    <div class="kpi"><span class="lbl">Planned by now</span><span class="v">${L && L.plannedPct != null ? pct(L.plannedPct) : '—'}</span><span class="small muted">${L ? `${planLbl}, end of week of ${fd(L.week)}` : 'log a week to compare'}</span></div>
     <div class="kpi"><span class="lbl">Schedule index</span><span class="v">${T.spi == null ? '—' : T.spi.toFixed(2)}</span>${spiState ? pill(spiState, ST_LABEL[spiState]) : '<span class="small muted">once planned work starts</span>'}</div>
     <div class="kpi"><span class="lbl">Earned h per logged h</span><span class="v">${T.eff == null ? '—' : T.eff.toFixed(2)}</span><span class="small muted">above 1 means faster than estimated</span></div>
-    <div class="kpi"><span class="lbl">Forecast finish</span><span class="v" style="font-size:17px">${T.forecast ? fd(T.forecast) : '—'}</span><span class="small muted">plan: ${T.end ? fd(T.end) : '—'}</span></div>
+    <div class="kpi"><span class="lbl">Forecast at current pace</span><span class="v" style="font-size:17px">${T.forecastRaw ? fd(T.forecastRaw) : '—'}</span><span class="small muted">${planLbl} finish ${T.end ? fd(T.end) : '—'}${T.forecast && T.forecastRaw && Math.abs(E.daysBetween(T.forecast, T.forecastRaw)) > 7 ? ` · smoothed for early weeks ${fd(T.forecast)}` : ''}</span></div>
   </div>`;
   const rows = T.rows.map(r => {
     const sp = r.plannedPct > 0 ? r.pct / r.plannedPct : null, st = sp == null ? null : sp >= 0.97 ? 'ok' : sp >= 0.85 ? 'risk' : 'no';
@@ -713,15 +813,16 @@ function viewTracking() {
       <td class="r"><button class="btn" data-act="tr-edit" data-id="${r.id}">${r.week === S.trWeek ? 'Editing' : 'Edit'}</button> <button class="btn ghost" data-act="rm-ac" data-id="${r.id}">Remove</button></td></tr>`;
   }).join('');
   const R = S.trWeek ? E.weekReport(P, S.actuals, A.sched, S.trWeek) : null;
-  return `<section class="panel">
+  return `${baselinePanel(A)}
+  <section class="panel">
     <div class="panel-head"><h2>Weekly actuals</h2><button class="btn primary" data-act="add-week">Log next week</button></div>
-    <p class="small muted">Log what each module finished every week. Completion is weighted by the estimated hours of each item, module by module. The plan comes from the Schedule tab.</p>
+    <p class="small muted">Log what each module finished every week, and how far setup and framework work has got. Completion is weighted by estimated hours and compared with the ${T.baseline ? 'frozen baseline' : 'current plan (no baseline frozen yet)'}.</p>
     ${kpis}
     <div class="tbl-wrap"><table><thead><tr><th>Week starting</th><th class="r">Designed</th><th class="r">Automated</th><th class="r">Manual executions</th><th class="r">Hours</th><th class="r">Done</th><th class="r">Plan</th><th>Status</th><th></th></tr></thead>
       <tbody>${rows || `<tr><td colspan="9" class="muted">No weeks logged yet. Select “Log next week” to add the first one.</td></tr>`}</tbody></table></div>
   </section>
   ${R ? weekEditor(R) + moduleProgress(R) + mailPanel(R) : ''}
-  <section class="panel"><div class="panel-head"><h2>Planned against actual completion</h2><div class="legend"><span><i style="background:var(--s1)"></i>Planned</span><span><i style="background:var(--s2)"></i>Actual</span></div></div>
+  <section class="panel"><div class="panel-head"><h2>Planned against actual completion</h2><div class="legend"><span><i style="background:var(--s1)"></i>Planned (${planLbl})</span><span><i style="background:var(--s2)"></i>Actual</span></div></div>
     <div class="chart" id="burn-chart"></div></section>`;
 }
 
@@ -732,18 +833,25 @@ function weekEditor(R) {
     const [key, , pk, scopeK] = k;
     if (!(m[scopeK] > 0)) return '<td class="muted">—</td>';
     const v = (mods[m.id] || {})[key] || 0;
-    return `<td><input type="number" class="w-s" min="0" step="1" id="ac-${r.id}-${m.id}-${key}" data-ac="${r.id}" data-mod="${m.id}" data-k="${key}" value="${v}"><span class="plan-hint">plan ${n0(m.weekPlan[pk])}</span></td>`;
+    const room = Math.max(0, Math.round(m[scopeK] - (m.act[key] - m.week[key])));
+    return `<td><input type="number" class="w-s" min="0" max="${room}" step="1" id="ac-${r.id}-${m.id}-${key}" data-ac="${r.id}" data-mod="${m.id}" data-k="${key}" value="${v}"><span class="plan-hint">plan ${n0(m.weekPlan[pk])} · max ${room}</span></td>`;
   };
   const hasMods = r.mods && Object.keys(r.mods).length;
   const legacy = hasMods ? (r.mods._all || null) : ((+r.designed || 0) + (+r.automated || 0) + (+r.executed || 0) > 0 ? { designed: r.designed, automated: r.automated, executed: r.executed } : null);
+  const otRows = R.ot.map(o => {
+    const val = r.ot && r.ot[o.key] != null && r.ot[o.key] !== '' ? r.ot[o.key] : '';
+    return `<label class="field"><span class="lbl">${OT_LABEL[o.key]} % done</span><input type="number" min="0" max="100" step="1" id="ac-${r.id}-ot-${o.key}" data-ac="${r.id}" data-ot="${o.key}" value="${val}" placeholder="${o.done != null ? Math.round(o.done) : 0}"><span class="hint">Planned by this week: ${Math.round(o.planned)}%</span></label>`;
+  }).join('');
   return `<section class="panel">
-    <div class="panel-head"><h2>Week of ${fd(R.week)}${R.weekNo ? ` <span class="muted small">week ${R.weekNo}</span>` : ''}</h2>
+    <div class="panel-head"><h2>Week of ${fd(R.week)} <span class="muted small">week ${R.weekNo}</span></h2>
       <label class="row small">Week ${selWeek('tr-week-a')}</label></div>
+    ${R.warnings.length ? `<div class="banner" role="status">${R.warnings.map(esc).join('<br>')}</div>` : ''}
     <div class="tbl-wrap"><table><thead><tr><th>Module</th>${KINDS.map(k => `<th>${k[1]}</th>`).join('')}</tr></thead><tbody>
       ${R.mods.map(m => `<tr><td>${esc(m.name)}</td>${KINDS.map(k => cell(m, k)).join('')}</tr>`).join('')}
       ${legacy ? `<tr class="sub"><td>Not split by module <span class="small muted">(logged before modules)</span></td>${KINDS.map(([key]) => `<td><input type="number" class="w-s" min="0" step="1" id="ac-${r.id}-_all-${key}" data-ac="${r.id}" data-mod="_all" data-k="${key}" value="${legacy[key] || 0}"></td>`).join('')}</tr>` : ''}
-      <tr class="total"><td>This week</td>${KINDS.map(([key, , pk]) => `<td class="num">${n0(R.totals.week[key])} <span class="plan-hint">plan ${n0(R.thisPlan ? R.thisPlan.total[pk] : 0)}</span></td>`).join('')}</tr>
+      <tr class="total"><td>This week</td>${KINDS.map(([key, , pk]) => `<td class="num">${n0(R.totals.week[key])} <span class="plan-hint">plan ${n0(R.thisPlan.total[pk])}</span></td>`).join('')}</tr>
     </tbody></table></div>
+    ${otRows ? `<div><h3>Setup and framework progress</h3><p class="small muted">Percent complete to date. Leave blank to carry over last week’s figure.</p><div class="fields" style="margin-top:8px">${otRows}</div></div>` : ''}
     <div class="fields">
       <label class="field"><span class="lbl">Hours logged by the team</span><input type="number" min="0" step="any" id="ac-${r.id}-hours" data-ac="${r.id}" data-k="hours" value="${+r.hours || 0}"><span class="hint">Used for productivity (earned h per logged h)</span></label>
     </div>
@@ -763,6 +871,7 @@ function moduleProgress(R) {
   return `<section class="panel"><div class="panel-head"><h2>Progress by module</h2><span class="small muted">to the end of week of ${fd(R.week)} · done / planned / total</span></div>
     <div class="tbl-wrap"><table><thead><tr><th>Module</th>${KINDS.map(k => `<th class="r">${k[1]}</th>`).join('')}<th class="r">Done</th><th>Status</th></tr></thead><tbody>
     ${R.mods.map(m => `<tr><td>${esc(m.name)}</td>${KINDS.map(([key, , pk, sk]) => c(m, key, pk, sk)).join('')}<td class="r num">${pct(m.pctDone)}</td><td>${pill(ST_PILL[m.status], ST_LABEL[m.status])}</td></tr>`).join('')}
+    ${R.ot.map(o => `<tr class="sub"><td>${OT_LABEL[o.key]}</td><td colspan="3" class="muted small">${o.done == null ? 'not logged yet' : Math.round(o.done) + '% done'} · ${Math.round(o.planned)}% planned by now</td><td class="r num">${o.done == null ? '—' : Math.round(o.done) + '%'}</td><td>${o.done == null ? '' : o.done + 3 >= o.planned ? pill('ok', 'On track') : o.done + 15 >= o.planned ? pill('risk', 'At risk') : pill('no', 'Behind')}</td></tr>`).join('')}
     </tbody></table></div></section>`;
 }
 
@@ -779,30 +888,38 @@ function mailModel(R, aud) {
   const title = M.title || P.name || 'the project';
   const label = ST_LABEL[R.status];
   const subject = `${title}: weekly status, week of ${fd(R.week)} (${label})`;
-  const pl = R.row.plannedPct;
+  const pl = R.row.plannedPct, target = P.end;
   let reason = `${pct(R.row.pct)} complete against ${pl == null ? '—' : pct(pl)} planned`;
-  if (R.forecast) reason += `; forecast finish ${fd(R.forecast)}` + (P.end ? (R.late > 0 ? `, ${plural(R.late, 'day', 'days')} after the ${fd(P.end)} target` : `, within the ${fd(P.end)} target`) : '');
+  if (R.forecast) {
+    reason += `; at the current pace the work finishes ${fd(R.forecast)}` + (target ? (R.late > 0 ? `, ${plural(R.late, 'day', 'days')} after the ${fd(target)} target` : `, within the ${fd(target)} target`) : '');
+    if (R.forecastSmoothed && Math.abs(E.daysBetween(R.forecastSmoothed, R.forecast)) > 7) reason += ` (allowing for early-week variation, about ${fd(R.forecastSmoothed)})`;
+  }
   reason += '.';
+  let base = '';
+  if (R.baseline) {
+    base = `Measured against the baseline agreed on ${fd(R.baseline.at)}.`;
+    const h = R.history; if (h.length > 1) base += ` Re-baselined on ${fd(h[h.length - 1].at)}${h[h.length - 1].reason ? ': ' + h[h.length - 1].reason : ''}.`;
+  }
   const inScope = KINDS.filter(([, , , sk]) => R.mods.some(m => m[sk] > 0));
   const scopeTot = { designed: R.totals.scope.design, automated: R.totals.scope.automate, executed: R.totals.scope.exec };
-  // risks
   const risks = [];
   R.mods.forEach(m => {
     if (m.status === 'no') risks.push(`<b>${esc(m.name)}</b> is behind plan: ${pct(m.earnedP ? m.earnedA / m.earnedP : 0)} of the work planned by now is done.`);
     else if (m.status === 'risk') risks.push(`<b>${esc(m.name)}</b> is slightly behind plan.`);
   });
+  R.ot.forEach(o => { if (o.done != null && o.done + 15 < o.planned) risks.push(`<b>${OT_LABEL[o.key]}</b> is behind: ${Math.round(o.done)}% done against ${Math.round(o.planned)}% planned.`); });
   if (R.late > 0) risks.push(`At the current pace the finish moves to ${fd(R.forecast)}, ${plural(R.late, 'day', 'days')} after the target.`);
   if (internal && R.eff != null && R.eff < 0.85) risks.push(`Productivity is ${R.eff.toFixed(2)} earned hours per logged hour, below the estimate.`);
+  if (internal) R.warnings.forEach(w => risks.push(esc(w)));
   lines(R.row.blockers).forEach(x => risks.push(esc(x)));
-  // next week
   const nx = [];
-  const np = R.nextPlan ? R.nextPlan.total : null;
-  if (np) {
-    const parts = [['design', 'design'], ['script', 'automate'], ['exec', 'run']].filter(([k]) => np[k] >= 0.5).map(([k, v]) => `${v} about ${n0(np[k])}`);
-    if (parts.length) nx.push(`Planned: ${parts.join(', ')} test cases.`);
-    const top = R.mods.filter(m => m.next.design + m.next.script + m.next.exec >= 0.5).map(m => esc(m.name));
-    if (top.length) nx.push(`Focus: ${top.join(', ')}.`);
-  }
+  const np = R.nextPlan.total;
+  const parts = [['design', 'design'], ['script', 'automate'], ['exec', 'run']].filter(([k]) => np[k] >= 0.5).map(([k, v]) => `${v} about ${n0(np[k])}`);
+  if (parts.length) nx.push(`Planned: ${parts.join(', ')} test cases.`);
+  const otNext = R.ot.filter(o => o.nextPlanned > o.planned + 0.5 && o.planned < 100).map(o => `${OT_LABEL[o.key].toLowerCase()} to about ${Math.round(o.nextPlanned)}%`);
+  if (otNext.length) nx.push(`Setup and framework: ${otNext.join(', ')}.`);
+  const top = R.mods.filter(m => m.next.design + m.next.script + m.next.exec >= 0.5).map(m => esc(m.name));
+  if (top.length) nx.push(`Focus: ${top.join(', ')}.`);
   R.ms.forEach(m => nx.push(`${esc(m.label)}: ${fd(m.date)}.`));
   const ns = E.addDays(R.week, 7), ne = E.addDays(R.week, 13);
   const locs = [...new Set(P.team.map(r => r.location))];
@@ -814,22 +931,24 @@ function mailModel(R, aud) {
     if (n) leave.push([r.name, n]);
   });
   if (leave.length) nx.push(internal ? `On leave: ${leave.map(([n, d]) => `${esc(n)} (${plural(d, 'day', 'days')})`).join(', ')}.` : `Planned leave: ${plural(leave.reduce((t, x) => t + x[1], 0), 'person-day', 'person-days')}.`);
-  return { title, subject, label, reason, inScope, scopeTot, risks, next: nx, highlights: lines(R.row.notes).map(esc), confirm: M.confirm.map(esc), internal, fte: M.fte };
+  return { title, subject, label, reason, base, inScope, scopeTot, risks, next: nx, highlights: lines(R.row.notes).map(esc), confirm: M.confirm.map(esc), internal, fte: M.fte };
 }
 
 function mailHTML(R, aud) {
   const P = S.P, X = mailModel(R, aud);
   const b = [];
   b.push(`<p>Hi all,</p>`);
-  b.push(`<p>Here’s the weekly status for <b>${esc(X.title)}</b>${R.weekNo ? `, week ${R.weekNo}` : ''} (${fd(R.week)} to ${fd(R.weekEnd)}).</p>`);
-  b.push(`<p><b>Overall: <span style="color:${MAIL_COL[R.status]}">■ ${X.label}</span>.</b> ${X.reason}</p>`);
+  b.push(`<p>Here’s the weekly status for <b>${esc(X.title)}</b>, week ${R.weekNo} (${fd(R.week)} to ${fd(R.weekEnd)}).</p>`);
+  b.push(`<p><b>Overall: <span style="color:${MAIL_COL[R.status]}">■ ${X.label}</span>.</b> ${X.reason}${X.base ? ' ' + esc(X.base) : ''}</p>`);
   b.push(mh('Progress'));
   b.push(mt(['', 'This week', 'Planned this week', 'To date', 'Planned to date', 'Total'],
-    X.inScope.map(([key, lab, pk]) => [lab, n0(R.totals.week[key]), n0(R.thisPlan ? R.thisPlan.total[pk] : 0), `<b>${n0(R.totals.toDate[key])}</b>`, n0(R.toPlan ? R.toPlan.total[pk] : 0), n0(X.scopeTot[key])]), [1, 2, 3, 4, 5]));
+    X.inScope.map(([key, lab, pk]) => [lab, n0(R.totals.week[key]), n0(R.thisPlan.total[pk]), `<b>${n0(R.totals.toDate[key])}</b>`, n0(R.toPlan.total[pk]), n0(X.scopeTot[key])]), [1, 2, 3, 4, 5]));
+  const otShown = R.ot.filter(o => o.planned > 0 || o.done != null);
+  if (otShown.length) b.push(mt(['Setup and framework', 'Done', 'Planned by now'], otShown.map(o => [OT_LABEL[o.key], o.done == null ? '—' : Math.round(o.done) + '%', Math.round(o.planned) + '%']), [1, 2]));
   if (R.mods.length > 1 || X.internal) {
     b.push(mh('By module'));
     b.push(mt(['Module', ...X.inScope.map(k => k[1].replace('Test cases ', '').replace(/^./, c => c.toUpperCase())), 'Done', 'Status'],
-      R.mods.map(m => [esc(m.name), ...X.inScope.map(([key, , , sk]) => m[sk] > 0 ? `${n0(m.act[key])} of ${n0(m[sk])}` : '—'), pct(m.pctDone), m.status === 'notstarted' ? 'Not started' : `<span style="color:${MAIL_COL[ST_PILL[m.status] === 'ok' ? 'ok' : m.status] || '#444'}">■</span> ${ST_LABEL[m.status]}`]), [X.inScope.length + 1]));
+      R.mods.map(m => [esc(m.name), ...X.inScope.map(([key, , , sk]) => m[sk] > 0 ? `${n0(Math.min(m.act[key], m[sk]))} of ${n0(m[sk])}` : '—'), pct(m.pctDone), m.status === 'notstarted' ? 'Not started' : `<span style="color:${MAIL_COL[ST_PILL[m.status] === 'ok' ? 'ok' : m.status] || '#444'}">■</span> ${ST_LABEL[m.status]}`]), [X.inScope.length + 1]));
   }
   if (X.highlights.length) { b.push(mh('Highlights')); b.push(mul(X.highlights)); }
   b.push(mh('Risks and blockers'));
@@ -840,7 +959,7 @@ function mailHTML(R, aud) {
     b.push(mh('Effort'));
     b.push(mul([`Hours logged this week: ${n0(R.hoursWeek)} (to date ${n0(R.hoursToDate)}).`,
       `Earned hours per logged hour: ${R.eff == null ? '—' : R.eff.toFixed(2)}.`,
-      `Schedule index: ${R.spi == null ? '—' : R.spi.toFixed(2)}. Planned finish ${R.plannedFinish ? fd(R.plannedFinish) : '—'}.`,
+      `Schedule index: ${R.spi == null ? '—' : R.spi.toFixed(2)}. ${R.baseline ? 'Baseline' : 'Planned'} finish ${R.plannedFinish ? fd(R.plannedFinish) : '—'}.`,
       `Team: ${FTE(X.fte)} FTE.`]));
   }
   b.push(`<p>Regards,<br>${esc(P.notes.sender || 'Your name')}</p>`);
@@ -850,24 +969,29 @@ function mailHTML(R, aud) {
 function mailPanel(R) {
   const aud = S.mailAud || 'client', key = R.week + '|' + aud;
   const X = mailModel(R, aud);
+  const gen = mailHTML(R, aud);
+  S.mailGen = S.mailGen || {}; S.mailGen[key] = gen;
   const edited = S.mailEdits && S.mailEdits[key];
-  const html = edited || mailHTML(R, aud);
+  const stale = edited && edited.base !== gen;
+  const html = edited ? edited.html : gen;
   return `<section class="panel" id="mail-panel">
     <div class="panel-head"><h2>Status email</h2>
       <div class="row">
         <label class="row small">Week ${selWeek('tr-week-b')}</label>
         <div class="seg" role="group" aria-label="Audience">${[['client', 'Client'], ['internal', 'Internal']].map(([k, l]) => `<button class="${aud === k ? 'on' : ''}" data-act="mail-aud" data-k="${k}" aria-pressed="${aud === k}">${l}</button>`).join('')}</div>
       </div></div>
-    <p class="small muted">${aud === 'client' ? 'Client version: progress, risks, next week and what you need from them. Hours and names on leave are left out.' : 'Internal version: adds hours, productivity, schedule index and who is on leave.'} You can edit the draft below before copying.</p>
+    <p class="small muted">${aud === 'client' ? 'Client version: progress, risks, next week and what you need from them. Hours, productivity and names on leave are left out.' : 'Internal version: adds hours, productivity, schedule index, data warnings and who is on leave.'} You can edit the draft below before copying.</p>
     <div class="fields">
       <label class="field"><span class="lbl">Sign off as</span>${inp('notes.sender', 'text', '', 'placeholder="Your name"')}</label>
     </div>
     <div class="subject-row"><span class="lbl">Subject</span><input type="text" id="mail-subject" readonly value="${esc(X.subject)}"><button class="btn" data-act="mail-subject">Copy subject</button></div>
+    ${stale ? `<div class="banner" role="alert"><b>The numbers have changed since you edited this draft.</b> Copying is paused so out-of-date figures don’t go out.
+      <div class="row" style="margin-top:8px"><button class="btn primary" data-act="mail-reset">Refresh the draft (discard my edits)</button><button class="btn" data-act="mail-keep">I’ve checked it, keep my edits</button></div></div>` : ''}
     <div id="mail-preview" class="mail" contenteditable="true" spellcheck="true" data-key="${esc(key)}">${html}</div>
     <div class="row">
-      <button class="btn primary" data-act="mail-copy">Copy email</button>
-      <button class="btn" data-act="mail-plain">Copy as plain text</button>
-      ${edited ? `<button class="btn" data-act="mail-reset">Undo my edits</button><span class="small muted">Edited. Changes to actuals won’t update this draft until you undo your edits.</span>` : ''}
+      <button class="btn primary" data-act="mail-copy" ${stale ? 'disabled' : ''}>Copy email</button>
+      <button class="btn" data-act="mail-plain" ${stale ? 'disabled' : ''}>Copy as plain text</button>
+      ${edited && !stale ? `<button class="btn" data-act="mail-reset">Undo my edits</button><span class="small muted">Edited</span>` : ''}
       ${S.mailNote ? `<span class="small" style="color:var(--good)">${esc(S.mailNote)}</span>` : ''}
     </div>
   </section>`;
@@ -875,7 +999,11 @@ function mailPanel(R) {
 
 document.addEventListener('input', ev => {
   const el = ev.target;
-  if (el && el.id === 'mail-preview') { S.mailEdits = S.mailEdits || {}; S.mailEdits[el.dataset.key] = el.innerHTML; }
+  if (el && el.id === 'mail-preview') {
+    S.mailEdits = S.mailEdits || {};
+    const k = el.dataset.key, prev = S.mailEdits[k];
+    S.mailEdits[k] = { html: el.innerHTML, base: prev ? prev.base : (S.mailGen && S.mailGen[k]) };
+  }
 });
 
 function flashMail(t) { S.mailNote = t; renderAll(); clearTimeout(S.mailTimer); S.mailTimer = setTimeout(() => { S.mailNote = ''; if (S.tab === 'tracking') renderAll(); }, 3500); }
@@ -909,14 +1037,20 @@ document.addEventListener('change', ev => {
   if (!el.dataset || !el.dataset.ac) return;
   const r = S.actuals.find(x => x.id === el.dataset.ac); if (!r) return;
   const k = el.dataset.k;
-  if (k === 'notes' || k === 'blockers') return saveActual({ ...r, [k]: el.value });
-  const v = Math.max(0, Number(el.value) || 0);
-  if (!el.dataset.mod) return saveActual({ ...r, [k]: v });
-  let mods = JSON.parse(JSON.stringify(r.mods || {}));
-  if (!Object.keys(mods).length && ((+r.designed || 0) + (+r.automated || 0) + (+r.executed || 0) > 0)) mods._all = { designed: +r.designed || 0, automated: +r.automated || 0, executed: +r.executed || 0 };
-  (mods[el.dataset.mod] || (mods[el.dataset.mod] = {}))[k] = v;
-  const sum = key => Object.values(mods).reduce((t, m) => t + (+m[key] || 0), 0);
-  saveActual({ ...r, mods, designed: sum('designed'), automated: sum('automated'), executed: sum('executed') });
+  if (k === 'notes' || k === 'blockers') return patchActual(r.id, { [k]: el.value });
+  if (el.dataset.ot) {
+    const v = el.value === '' ? null : Math.min(100, Math.max(0, Math.round(Number(el.value) || 0)));
+    return patchActual(r.id, { ot: { [el.dataset.ot]: v } });
+  }
+  let v = Math.max(0, Number(el.value) || 0);
+  if (el.max !== '' && v > +el.max) { v = +el.max; el.value = v; S.saving = `Capped at the ${v} left in scope`; renderHeader(); }
+  if (el.step === '1') v = Math.round(v);
+  if (!el.dataset.mod) return patchActual(r.id, { [k]: v });
+  const patch = { mods: { [el.dataset.mod]: { [k]: v } } };
+  // first module entry on a week logged before modules: keep the old totals as "not split"
+  if (!(r.mods && Object.keys(r.mods).length) && ((+r.designed || 0) + (+r.automated || 0) + (+r.executed || 0) > 0) && el.dataset.mod !== '_all')
+    patch.mods._all = { designed: +r.designed || 0, automated: +r.automated || 0, executed: +r.executed || 0 };
+  patchActual(r.id, patch);
 });
 
 /* ---------- charts ---------- */
@@ -982,18 +1116,11 @@ function drawCapChart() {
 function drawBurnChart() {
   const T = S.T, el = $('#burn-chart'); if (!el || !T) return;
   if (!T.plan) { el.innerHTML = '<p class="small muted">Add team members and a start date to see the plan.</p>'; return; }
-  let plan;
-  const pw = T.sched && T.sched._planByWeek;
-  if (pw && T.sched.weekStart) {
-    plan = [[S.P.start, 0], ...Object.keys(pw).map(Number).sort((x, y) => x - y).map(w => [E.addDays(T.sched.weekStart, w * 7 + 6), pw[w] * 100])];
-    if (T.end) plan = plan.filter(x => x[0] <= E.addDays(T.end, 6));
-  } else {
-    const step = Math.max(1, Math.floor(T.plan.length / 160));
-    plan = T.plan.filter((p, i) => i % step === 0 || i === T.plan.length - 1).map(p => [p[0], p[1] * 100]);
-  }
+  let plan = T.plan.map(p => [p[0], p[1] * 100]);
+  if (T.end) plan = plan.filter(x => x[0] <= E.addDays(T.end, 6));
   const act = T.rows.map(r => [E.addDays(r.week, 6), r.pct * 100]);
   const refX = []; if (S.P.end) refX.push({ date: S.P.end, label: 'Target', anchor: 'end' });
-  if (T.forecast) refX.push({ date: T.forecast, label: 'Forecast', dy: 14 });
+  if (T.forecastRaw) refX.push({ date: T.forecastRaw, label: 'Forecast (current pace)', dy: 14 });
   lineChart(el, { series: [{ name: 'Planned', color: 'var(--s1)', pts: plan }, { name: 'Actual', color: 'var(--s2)', pts: act, markers: true }], refX, yMax: 100, yFmt: v => Math.round(v) + '%' });
 }
 let rz; window.addEventListener('resize', () => { clearTimeout(rz); rz = setTimeout(() => { if (S.tab === 'summary') drawCapChart(); if (S.tab === 'tracking') drawBurnChart(); if (S.tab === 'schedule') { drawGantt(); drawHeat(); } }, 150); });
@@ -1263,7 +1390,10 @@ document.addEventListener('click', ev => {
     case 'del-no': S.confirmDel = false; renderHeader(); break;
     case 'del-yes': S.confirmDel = false; deleteProject(); break;
     case 'xlsx': exportXlsx(); break;
+    case 'conflict-theirs': { const t = S.conflict.theirs; S.conflict = null; try { S.P = migrate(JSON.parse(JSON.stringify(t.data))); S.rev = t.rev; S.A = null; S.saving = 'Loaded the latest version'; } catch (e) { S.loadError = 'Their version is damaged and couldn’t be opened.'; S.P = null; } renderAll(); break; }
+    case 'conflict-mine': { S.rev = S.conflict.theirs && S.conflict.theirs.rev; S.conflict = null; saveNow(); break; }
     case 'copy-summary': copySummary(); break;
+    case 'sum-aud': S.sumAud = b.dataset.k; renderAll(); break;
     case 'copy-close': S.copyFallback = null; renderAll(); break;
     case 'add-mod': mut(() => P.modules.push(E.newModule('Module ' + (P.modules.length + 1), P.modules.length + 1))); break;
     case 'rm-mod': mut(() => P.modules.splice(i, 1)); break;
@@ -1274,6 +1404,29 @@ document.addEventListener('click', ev => {
     case 'rm-leave': mut(() => P.team[i].leaves.splice(+b.dataset.j, 1)); break;
     case 'add-loc': mut(() => P.locations.push('Location ' + (P.locations.length + 1))); break;
     case 'rm-loc': mut(() => P.locations.splice(i, 1)); break;
+    case 'hol-import': {
+      const loc = $('#hol-loc').value, lines = ($('#hol-paste').value || '').split('\n').map(x => x.trim()).filter(Boolean);
+      let added = 0, bad = 0, dup = 0;
+      lines.forEach(line => {
+        const parts = line.split(/\t|,|;/).map(x => x.trim());
+        let d = parts[0] || '';
+        const m1 = d.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/), m2 = d.match(/^(\d{1,2})[\/.-](\d{1,2})[\/.-](\d{4})$/);
+        if (m1) d = `${m1[1]}-${m1[2].padStart(2, '0')}-${m1[3].padStart(2, '0')}`; else if (m2) d = `${m2[3]}-${m2[2].padStart(2, '0')}-${m2[1].padStart(2, '0')}`; else { bad++; return; }
+        if (isNaN(E.toD(d)) || E.toS(E.toD(d)) !== d) { bad++; return; }
+        const l = parts[2] && P.locations.includes(parts[2]) ? parts[2] : loc;
+        if (P.holidays.some(h => h.date === d && h.location === l)) { dup++; return; }
+        P.holidays.push({ id: E.uid(), date: d, name: parts[1] || 'Holiday', location: l }); added++;
+      });
+      S.holOpen = true; S.holNote = `Added ${added}.` + (dup ? ` Skipped ${dup} already listed.` : '') + (bad ? ` Couldn’t read ${bad} line${bad > 1 ? 's' : ''}: check the date format.` : '');
+      touch(); break;
+    }
+    case 'hol-gen': {
+      const loc = $('#hol-gen-loc').value, y = +$('#hol-gen-year').value;
+      let added = 0;
+      E.generateHolidays(y, y, [loc]).forEach(h => { if (!P.holidays.some(x => x.date === h.date && x.location === h.location)) { P.holidays.push(h); added++; } });
+      S.holOpen = true; S.holNote = `Added ${added} ${loc} holidays for ${y}.`;
+      touch(); break;
+    }
     case 'add-hol': mut(() => P.holidays.push({ id: E.uid(), date: P.start, name: 'Holiday', location: P.locations[0] })); break;
     case 'rm-hol': mut(() => P.holidays.splice(i, 1)); break;
     case 'add-dt': mut(() => P.downtimes.push({ id: E.uid(), from: P.start, to: P.start, impact: 100, reason: '' })); break;
@@ -1287,7 +1440,7 @@ document.addEventListener('click', ev => {
       const weeks = S.actuals.map(x => x.week).sort();
       const wk = weeks.length ? E.addDays(weeks[weeks.length - 1], 7) : E.mondayOf(P.start);
       S.trWeek = wk;
-      saveActual({ id: wk, week: wk, designed: 0, executed: 0, automated: 0, hours: 0, notes: '', blockers: '', mods: {} });
+      createActual({ id: wk, week: wk, hours: 0, notes: '', blockers: '', mods: {}, ot: {} });
       break;
     }
     case 'rm-ac': deleteActual(b.dataset.id); break;
@@ -1297,6 +1450,19 @@ document.addEventListener('click', ev => {
     case 'mail-plain': copyMail(true); break;
     case 'mail-subject': copySubject(); break;
     case 'mail-reset': { const el = $('#mail-preview'); if (el && S.mailEdits) delete S.mailEdits[el.dataset.key]; renderAll(); break; }
+    case 'mail-keep': { const el = $('#mail-preview'); const k = el && el.dataset.key; if (k && S.mailEdits && S.mailEdits[k]) S.mailEdits[k].base = S.mailGen[k]; renderAll(); break; }
+    case 'baseline-start': S.rebaseline = true; S.baselineNote = ''; renderAll(); break;
+    case 'baseline-cancel': S.rebaseline = false; S.baselineNote = ''; renderAll(); break;
+    case 'baseline-freeze': {
+      const reason = ($('#baseline-reason') || {}).value || '';
+      if (P.baseline && !reason.trim()) { S.baselineNote = 'Give a reason for re-baselining. It goes into the status emails.'; renderAll(); break; }
+      const A = analysis();
+      if (!A.sched || !A.sched.finish) break;
+      const b = E.makeBaseline(P, A.sched, reason.trim());
+      P.baselineHistory = (P.baselineHistory || []).concat([{ at: b.at, reason: b.reason, finish: b.finish, total: b.total, tcs: b.tcs, autoTCs: b.autoTCs }]);
+      P.baseline = b; S.rebaseline = false; S.baselineNote = '';
+      touch(); break;
+    }
   }
 });
 document.addEventListener('change', ev => {
@@ -1320,12 +1486,12 @@ async function exportXlsx() {
     ['Overview', SM.overview], ['Recommendation', SM.rec || ''], [],
     ['Project', P.name], ['Client', P.client], ['Start date', P.start], ['Target end date', P.end || ''], ['Status', st], [],
     ['Total effort (likely), hours', r1(e.total)], ['Total effort (likely), person-days', r1(e.total / a.hoursPerDay)],
-    ['Best case, hours', r1(e.total * a.pertBest)], ['Worst case, hours', r1(e.total * a.pertWorst)], ['PERT expected, hours', r1(A.expectedTotal)], [],
+    ['Best case, hours', r1(e.best)], ['Worst case, hours', r1(e.worst)], ['PERT expected, hours', r1(A.expectedTotal)], ...(A.teamTime ? [['Team time to price, hours', r1(A.teamTime.hours)], ['Team time FTE x working days', `${r1(A.teamTime.fte)} x ${A.teamTime.workdays}`]] : []), ...(A.need && A.need.teamTime ? [['Team time with recommended team, hours', r1(A.need.teamTime.hours)]] : []), [],
     ['Test cases', Math.round(e.tcs)], ['Test cases to automate', Math.round(e.autoTCs)], []
   ];
   if (A.finish) sum.push(['Finish with current team (likely)', A.finish.likely.date || 'Not reachable'], ['Finish (best)', A.finish.best.date || ''], ['Finish (worst)', A.finish.worst.date || '']);
   if (A.need) sum.push(['Extra engineers needed by target', A.need.extra ?? 'Over 300'], ['Extra engineers for worst case', A.needWorst.extra ?? 'Over 300'], ['Mix of extra engineers', (A.need.heads || []).map(h => h.n + ' x ' + h.level).join(', ')], ['Extra leads', A.need.needLeads || 0], ['Extra manager', A.need.needMgr || 0]);
-  sum.push([], ['What\'s driving it'], ...SM.drivers.map(x => ['', x.replace(/\*\*/g, '')]));
+  sum.push([], ['What\'s driving it'], ...SM.drivers.map(x => ['', x.replace('**internal**', '').replace(/\*\*/g, '')]));
   if (SM.excluded.length) sum.push([], ['Not included'], ...SM.excluded.map(x => ['', x]));
   if (SM.confirm.length) sum.push([], ['To confirm with the customer'], ...SM.confirm.map(x => ['', x]));
   if (A.scope) sum.push(['Share of scope achievable by target', r1(A.scope.f * 100) + '%'], ['Test cases achievable by target', Math.floor(e.tcs * Math.min(A.scope.f, 1))]);
@@ -1400,11 +1566,13 @@ async function exportXlsx() {
     if (S.id) {
       const cur = S.list.find(x => x.id === S.id);
       if (!cur) { S.P = null; S.id = null; if (S.list.length) openProject(S.list[0].id); else renderAll(); return; }
-      // someone else changed the open project, and we have no unsaved edits: take theirs
-      if (cur.rev && cur.rev !== S.rev && S.saving !== 'Unsaved' && S.saving !== 'Saving…') {
-        S.P = migrate(JSON.parse(JSON.stringify(cur.data))); S.rev = cur.rev; S.A = null; renderAll(); return;
+      if (cur.rev && cur.rev !== S.rev && cur.rev !== S.pendingRev && !S.conflict) {
+        if (S.saving === 'Unsaved' || S.saving === 'Saving…') { setConflict(cur); return; } // both edited: ask
+        // someone else saved and we have no unsaved edits: take theirs
+        try { S.P = migrate(JSON.parse(JSON.stringify(cur.data))); S.rev = cur.rev; S.A = null; } catch (e) { S.loadError = 'The latest version of this project is damaged and couldn’t be opened.'; S.P = null; }
+        renderAll(); return;
       }
     }
     renderHeader();
-  }, err => { S.loading = false; S.timeoutNote = 'Saved projects couldn’t be loaded.'; renderAll(); });
+  }, err => { S.loading = false; S.timeoutNote = 'Saved projects couldn’t be loaded' + (err && err.message ? ` (${err.message})` : '') + '. Check that the server is running, then reload the page.'; renderAll(); });
 })();

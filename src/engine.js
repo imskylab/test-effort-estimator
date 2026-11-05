@@ -85,23 +85,41 @@ const ENGINE = (() => {
     };
   }
 
-  function defaultHolidays() {
-    const h = (date, name, location) => ({ id: uid(), date, name, location });
-    return [
-      h('2026-01-26', 'Republic Day', 'India'), h('2026-08-15', 'Independence Day', 'India'),
-      h('2026-10-02', 'Gandhi Jayanti', 'India'), h('2026-12-25', 'Christmas', 'India'),
-      h('2027-01-01', 'New Year', 'India'), h('2027-01-26', 'Republic Day', 'India'),
-      h('2027-08-15', 'Independence Day', 'India'), h('2027-10-02', 'Gandhi Jayanti', 'India'),
-      h('2027-12-25', 'Christmas', 'India'),
-      h('2026-11-26', 'Thanksgiving', 'USA'), h('2026-12-25', 'Christmas', 'USA'),
-      h('2027-01-01', "New Year's Day", 'USA'), h('2027-01-18', 'Martin Luther King Jr. Day', 'USA'),
-      h('2027-02-15', "Presidents' Day", 'USA'), h('2027-05-31', 'Memorial Day', 'USA'),
-      h('2027-06-18', 'Juneteenth (observed)', 'USA'), h('2027-07-05', 'Independence Day (observed)', 'USA'),
-      h('2027-09-06', 'Labor Day', 'USA'), h('2027-10-11', 'Columbus Day', 'USA'),
-      h('2027-11-11', 'Veterans Day', 'USA'), h('2027-11-25', 'Thanksgiving', 'USA'),
-      h('2027-12-24', 'Christmas (observed)', 'USA')
-    ];
+  /* Public holidays that can be calculated exactly. Festival holidays that follow the lunar
+   * calendar (Holi, Eid, Dussehra, Diwali and others) are not generated: paste them from the
+   * company holiday list on the Calendar tab. */
+  function nthDow(y, m, dowWanted, n) { // n >= 1, or -1 for last
+    if (n > 0) { let d = Date.UTC(y, m, 1); while (new Date(d).getUTCDay() !== dowWanted) d += DAY; return toS(d + (n - 1) * 7 * DAY); }
+    let d = Date.UTC(y, m + 1, 0); while (new Date(d).getUTCDay() !== dowWanted) d -= DAY; return toS(d);
   }
+  function observed(s) { const w = dow(s); return w === 6 ? addDays(s, -1) : w === 0 ? addDays(s, 1) : s; }
+  function easter(y) { // anonymous Gregorian algorithm
+    const a = y % 19, b = Math.floor(y / 100), c = y % 100, d = Math.floor(b / 4), e = b % 4, f = Math.floor((b + 8) / 25), g = Math.floor((b - f + 1) / 3);
+    const h = (19 * a + b - d - g + 15) % 30, i = Math.floor(c / 4), k = c % 4, l = (32 + 2 * e + 2 * i - h - k) % 7, m = Math.floor((a + 11 * h + 22 * l) / 451);
+    const month = Math.floor((h + l - 7 * m + 114) / 31), day = ((h + l - 7 * m + 114) % 31) + 1;
+    return toS(Date.UTC(y, month - 1, day));
+  }
+  const pad = n => String(n).padStart(2, '0');
+  function generateHolidays(fromYear, toYear, locations = ['India', 'USA']) {
+    const out = [], h = (date, name, location) => out.push({ id: uid(), date, name, location });
+    for (let y = fromYear; y <= toYear; y++) {
+      if (locations.includes('India')) {
+        h(`${y}-01-01`, "New Year's Day", 'India'); h(`${y}-01-26`, 'Republic Day', 'India');
+        h(addDays(easter(y), -2), 'Good Friday', 'India'); h(`${y}-08-15`, 'Independence Day', 'India');
+        h(`${y}-10-02`, 'Gandhi Jayanti', 'India'); h(`${y}-12-25`, 'Christmas', 'India');
+      }
+      if (locations.includes('USA')) {
+        h(observed(`${y}-01-01`), "New Year's Day", 'USA'); h(nthDow(y, 0, 1, 3), 'Martin Luther King Jr. Day', 'USA');
+        h(nthDow(y, 1, 1, 3), "Presidents' Day", 'USA'); h(nthDow(y, 4, 1, -1), 'Memorial Day', 'USA');
+        h(observed(`${y}-06-19`), 'Juneteenth', 'USA'); h(observed(`${y}-07-04`), 'Independence Day', 'USA');
+        h(nthDow(y, 8, 1, 1), 'Labor Day', 'USA'); h(nthDow(y, 9, 1, 2), 'Columbus Day', 'USA');
+        h(observed(`${y}-11-11`), 'Veterans Day', 'USA'); h(nthDow(y, 10, 4, 4), 'Thanksgiving', 'USA');
+        h(observed(`${y}-12-25`), 'Christmas', 'USA');
+      }
+    }
+    return out.sort((x, y) => x.date < y.date ? -1 : 1);
+  }
+  function defaultHolidays(year) { const y = year || new Date().getUTCFullYear(); return generateHolidays(y, y + 2); }
 
   function newModule(name, priority) {
     return { id: uid(), name: name || 'New module', appType: 'Web', tcs: 100, mix: { S: 30, M: 40, C: 20, V: 10 },
@@ -119,7 +137,7 @@ const ENGINE = (() => {
       locations: ['India', 'USA'],
       modules: [newModule('Module 1', 1)],
       team: [newResource(1)],
-      holidays: defaultHolidays(),
+      holidays: defaultHolidays(+start.slice(0, 4)),
       downtimes: [],
       notes: { drivers: '', excluded: '', confirm: '', sender: '' },
       a: defaults()
@@ -127,6 +145,10 @@ const ENGINE = (() => {
   }
 
   const find = (arr, key) => arr.find(x => x.key === key);
+  // input guards: no negative counts, percentages within 0-100, whole cycles
+  const nn = v => Math.max(0, +v || 0);
+  const pct100 = v => Math.min(100, nn(v));
+  const cycles = a => Math.max(0, Math.round(+a.manualCycles || 0));
   const PHASE_BY_ID = { ot1: 'start', ot2: 'start', ot3: 'framework', ot4: 'cicd', ot5: 'cicd', ot6: 'start', ot7: 'start', ot8: 'end', ot9: 'common' };
   const PHASES = ['start', 'framework', 'common', 'cicd', 'end'];
 
@@ -184,16 +206,17 @@ const ENGINE = (() => {
     const mods = p.modules.map(m => {
       const app = (find(a.appTypes, m.appType) || { factor: 1 }).factor;
       const td = (find(a.testData, m.testData) || { factor: 1 }).factor;
-      const mixSum = a.complexity.reduce((s, c) => s + (+m.mix[c.key] || 0), 0) || 1;
+      const mixSum = a.complexity.reduce((s, c) => s + nn(m.mix[c.key]), 0) || 1;
       let design = 0, exec = 0, script = 0, autoTCs = 0;
       const counts = {};
+      const cyc = cycles(a);
       a.complexity.forEach(c => {
-        const n = (+m.tcs || 0) * ((+m.mix[c.key] || 0) / mixSum) * scale;
+        const n = nn(m.tcs) * (nn(m.mix[c.key]) / mixSum) * scale;
         counts[c.key] = n;
         if (m.design) design += n * c.design;
-        if (m.manualExec) exec += n * c.exec * a.manualCycles * (1 + a.retestPct / 100);
+        if (m.manualExec) exec += n * c.exec * cyc * (1 + a.retestPct / 100);
         if (m.automation) {
-          const an = n * (+m.autoPct || 0) / 100;
+          const an = n * pct100(m.autoPct) / 100;
           autoTCs += an;
           script += an * c.auto * app * td * (1 - a.reusePct / 100);
         }
@@ -201,7 +224,7 @@ const ENGINE = (() => {
       const review = script * a.reviewPct / 100;
       const maint = script * a.maintenancePct / 100;
       const autoExec = m.automation ? autoTCs / 100 * a.analysisPer100 * a.autoCycles : 0;
-      return { id: m.id, name: m.name, tcs: (+m.tcs || 0) * scale, autoTCs, counts, design, exec, script, review, maint, autoExec,
+      return { id: m.id, name: m.name, tcs: nn(m.tcs) * scale, autoTCs, counts, design, exec, script, review, maint, autoExec,
         manual: design + exec, auto: script + review + maint + autoExec };
     });
     const sum = k => mods.reduce((s, m) => s + m[k], 0);
@@ -222,7 +245,9 @@ const ENGINE = (() => {
       manual: (sum('manual') + ot.manual) * cf,
       common: ot.common * cf
     };
-    return { mods, lines, variable, base, total: base * cf, oneTimeTotal: lines.oneTime * cf, pools,
+    // The risk range is applied to the base estimate; contingency is not stacked on the worst case.
+    const best = base * a.pertBest, worst = base * a.pertWorst;
+    return { mods, lines, variable, base, total: base * cf, best, worst, expected: (best + 4 * base * cf + worst) / 6, oneTimeTotal: lines.oneTime * cf, pools,
       tcs: sum('tcs'), autoTCs: sum('autoTCs') };
   }
 
@@ -266,7 +291,7 @@ const ENGINE = (() => {
       const hrs = team.map((r, k) => {
         const m = models[k];
         if (!wd || d < m.start || d > m.end) return 0;
-        const alloc = (+r.alloc || 0) / 100;
+        const alloc = pct100(r.alloc) / 100;
         const gross = hpd * alloc;
         if (ded) ded.gross += gross;
         if ((hs[r.location] || new Set()).has(d)) { if (ded) ded.holidays += gross; return 0; }
@@ -356,11 +381,11 @@ const ENGINE = (() => {
     return p.modules.map((m, idx) => {
       const app = (find(a.appTypes, m.appType) || { factor: 1 }).factor;
       const td = (find(a.testData, m.testData) || { factor: 1 }).factor;
-      const mixSum = a.complexity.reduce((s, c) => s + (+m.mix[c.key] || 0), 0) || 1;
+      const mixSum = a.complexity.reduce((s, c) => s + nn(m.mix[c.key]), 0) || 1;
       let N = 0, dH = 0, xH = 0, sH = 0;
-      const ap = (+m.autoPct || 0) / 100;
+      const ap = pct100(m.autoPct) / 100;
       a.complexity.forEach(c => {
-        const n = (+m.tcs || 0) * ((+m.mix[c.key] || 0) / mixSum) * scale;
+        const n = nn(m.tcs) * (nn(m.mix[c.key]) / mixSum) * scale;
         N += n; dH += n * c.design; xH += n * c.exec * (1 + a.retestPct / 100);
         sH += n * ap * c.auto * app * td * (1 - a.reusePct / 100);
       });
@@ -541,8 +566,9 @@ const ENGINE = (() => {
     if (hasTeam && e.pools.auto > 0 && !can('Automation')) out.missing.push('automation');
     if (hasTeam && e.pools.manual > 0 && !can('Manual')) out.missing.push('manual');
     if (hasTeam && e.pools.common > 0 && !p.team.some(r => (+r.alloc || 0) > 0 && r.role !== 'Manager')) out.missing.push('one-time');
-    out.expectedTotal = e.total * (p.a.pertBest + 4 + p.a.pertWorst) / 6;
-    const scen = { best: p.a.pertBest, likely: 1, worst: p.a.pertWorst };
+    out.expectedTotal = e.expected;
+    const cf0 = 1 + p.a.contingencyPct / 100;
+    const scen = { best: p.a.pertBest / cf0, likely: 1, worst: p.a.pertWorst / cf0 };
     if (hasTeam && p.start && !out.missing.length) {
       out.sched = schedule(p, {});
       out.finish = {
@@ -569,16 +595,30 @@ const ENGINE = (() => {
     } else if (hasTeam && out.finish && out.finish.likely.date) {
       out.window = capacityIn(p, p.team, p.start, out.finish.likely.date);
     }
+    // Team time: the hours people are booked on the project (working days x allocation, less public
+    // holidays and leave), including leads, managers and waiting time. This is what gets priced.
+    const tt = (team, until) => { if (!until) return null; const c = capacityIn(p, team, p.start, until); const fte = team.reduce((t, r) => t + pct100(r.alloc) / 100, 0);
+      let wd = 0; for (let d = p.start; d <= until; d = addDays(d, 1)) if (p.a.workDays.includes(dow(d))) wd++;
+      return { hours: c.ded.gross - c.ded.holidays - c.ded.leave, fte, workdays: wd, until }; };
+    if (hasTeam && out.finish && out.finish.likely.date) out.teamTime = tt(p.team, out.finish.likely.date);
+    if (out.need && out.need.extra > 0 && out.need.finish) out.need.teamTime = tt(p.team.concat(hireTeam(p, out.need.extra)), out.need.finish);
     return out;
   }
 
   /* ---------- Tracking ----------
-   * Weekly actuals: { week, hours, notes, blockers, mods: { <moduleId>: { designed, automated, executed } } }.
-   * Older weeks may only carry project totals (designed, automated, executed); those are earned
-   * at project-average weights. Earned hours use the estimate without contingency.
+   * Weekly actuals: { week, hours, notes, blockers,
+   *   mods: { <moduleId>: { designed, automated, executed } },      counts done that week
+   *   ot:   { setup, framework, common, cicd, close } }               % complete to date
+   * Older weeks may only carry project totals (designed, automated, executed); those count at
+   * project-average weights. Earned hours use the estimate without contingency, so earned
+   * divided by the base estimate is % complete.
+   *
+   * Progress is measured against a plan: the frozen baseline when there is one, otherwise the
+   * current schedule. Both have the same compact shape (see compactPlan).
    */
+  const OT_PHASES = ['setup', 'framework', 'common', 'cicd', 'close'];
   function trackWeights(p) {
-    const e = effort(p), a = p.a, cyc = Math.max(0, Math.round(+a.manualCycles || 0));
+    const e = effort(p), a = p.a, cyc = cycles(a);
     let dN = 0, xN = 0;
     const mods = p.modules.map((pm, i) => {
       const m = e.mods[i];
@@ -590,88 +630,121 @@ const ENGINE = (() => {
         wA: m.autoTCs ? (m.script + m.review + m.maint + m.autoExec) / m.autoTCs : 0
       };
     });
+    const { b } = oneTimeBuckets(p);
     return {
-      e, V: e.variable || 1, mods,
+      V: e.base || 1, mods,
+      ot: { setup: b.start, framework: b.framework, common: b.common, cicd: b.cicd, close: b.end },
       wD: dN ? e.lines.design / dN : 0,
       wX: xN ? e.lines.exec / xN : 0,
       wA: e.autoTCs ? (e.lines.script + e.lines.review + e.lines.maint + e.lines.autoExec) / e.autoTCs : 0
     };
   }
-  // Per-module counts in a week row; legacy totals go under '_all'.
+  // The plan in a compact, freezable form: weights plus planned counts and one-time hours per week.
+  function compactPlan(p, sched) {
+    const e = effort(p), cf0 = 1 + p.a.contingencyPct / 100;
+    const weeks = {};
+    if (sched && sched.weeks) Object.entries(sched.weeks).forEach(([w, v]) => {
+      const ot = {};
+      [['setup', 'setup'], ['framework', 'framework'], ['common', 'common'], ['cicd', 'cicd'], ['close', 'close']].forEach(([c, k]) => { if (v.cats[c]) ot[k] = v.cats[c] / cf0; });
+      const mods = {};
+      Object.entries(v.mods || {}).forEach(([id, x]) => { mods[id] = { design: +x.design.toFixed(3), script: +x.script.toFixed(3), exec: +x.exec.toFixed(3) }; });
+      weeks[w] = { mods, ot };
+    });
+    return { W: trackWeights(p), weeks, weekStart: sched ? sched.weekStart : mondayOf(p.start), finish: sched ? sched.finish : null,
+      start: p.start, end: p.end || '', total: e.total, base: e.base, tcs: e.tcs, autoTCs: e.autoTCs };
+  }
+  function makeBaseline(p, sched, reason) {
+    return Object.assign(compactPlan(p, sched), { at: toS(Date.now()), reason: reason || '' });
+  }
+  function baselineVariance(p, sched) {
+    const b = p.baseline; if (!b) return null;
+    const live = compactPlan(p, sched);
+    return { finishDays: b.finish && live.finish ? daysBetween(b.finish, live.finish) : null, effort: live.total - b.total,
+      tcs: live.tcs - b.tcs, autoTCs: live.autoTCs - b.autoTCs, endChanged: (b.end || '') !== (p.end || ''), liveFinish: live.finish };
+  }
+  // cumulative planned progress by week index
+  function planCurve(src) {
+    const W = src.W, out = {};
+    let cum = 0;
+    const otCum = {}, modCum = {};
+    Object.keys(src.weeks).map(Number).sort((x, y) => x - y).forEach(w => {
+      const v = src.weeks[w];
+      Object.entries(v.mods || {}).forEach(([id, x]) => {
+        const mw = W.mods.find(m => m.id === id) || W;
+        cum += x.design * mw.wD + x.exec * mw.wX + x.script * mw.wA;
+        const o = modCum[id] || (modCum[id] = { design: 0, script: 0, exec: 0 });
+        o.design += x.design; o.script += x.script; o.exec += x.exec;
+      });
+      Object.entries(v.ot || {}).forEach(([k, h]) => { cum += h; otCum[k] = (otCum[k] || 0) + h; });
+      out[w] = { frac: Math.min(1, cum / W.V), ot: { ...otCum }, mods: JSON.parse(JSON.stringify(modCum)) };
+    });
+    return out;
+  }
   function rowMods(r) {
     if (r.mods && Object.keys(r.mods).length) return r.mods;
     if ((+r.designed || 0) + (+r.executed || 0) + (+r.automated || 0) > 0) return { _all: { designed: +r.designed || 0, executed: +r.executed || 0, automated: +r.automated || 0 } };
     return {};
   }
-  function rowEarned(W, r) {
-    let h = 0;
-    Object.entries(rowMods(r)).forEach(([id, v]) => {
-      const w = W.mods.find(m => m.id === id) || W;
-      h += (+v.designed || 0) * w.wD + (+v.executed || 0) * w.wX + (+v.automated || 0) * w.wA;
-    });
-    return h;
-  }
   function tracking(p, actuals, sched) {
-    const W = trackWeights(p);
+    const s = (p.team.length && p.start) ? (sched || schedule(p, {})) : null;
+    const src = p.baseline || compactPlan(p, s);
+    const W = src.W, curve = planCurve(src);
+    const wIdx = d => Math.floor(daysBetween(src.weekStart, d) / 7);
+    const planAt = d => { const w = wIdx(d); let v = 0; for (const k in curve) if (+k <= w) v = Math.max(v, curve[k].frac); return v; };
     const sorted = actuals.slice().sort((x, y) => x.week < y.week ? -1 : 1);
-    let cumD = 0, cumX = 0, cumA = 0, cumH = 0, earned = 0;
+    const cum = {}; // per module counts to date
+    let cumD = 0, cumX = 0, cumA = 0, cumH = 0;
+    const otNow = {};
     const rows = sorted.map(r => {
       const M = rowMods(r);
-      const t = Object.values(M).reduce((s, v) => ({ d: s.d + (+v.designed || 0), x: s.x + (+v.executed || 0), a: s.a + (+v.automated || 0) }), { d: 0, x: 0, a: 0 });
-      cumD += t.d; cumX += t.x; cumA += t.a; cumH += +r.hours || 0; earned += rowEarned(W, r);
-      return { ...r, designed: t.d, executed: t.x, automated: t.a, cumD, cumX, cumA, cumH, earned, pct: Math.min(1, earned / W.V) };
+      const t = { d: 0, x: 0, a: 0 };
+      Object.entries(M).forEach(([id, v]) => {
+        const o = cum[id] || (cum[id] = { designed: 0, automated: 0, executed: 0 });
+        o.designed += nn(v.designed); o.automated += nn(v.automated); o.executed += nn(v.executed);
+        t.d += nn(v.designed); t.x += nn(v.executed); t.a += nn(v.automated);
+      });
+      cumD += t.d; cumX += t.x; cumA += t.a; cumH += nn(r.hours);
+      Object.entries(r.ot || {}).forEach(([k, v]) => { if (v !== '' && v != null) otNow[k] = Math.min(100, nn(v)); });
+      // earned to date, never more than the scope of each module
+      let earned = 0;
+      Object.entries(cum).forEach(([id, o]) => {
+        const mw = W.mods.find(m => m.id === id);
+        if (mw) earned += Math.min(o.designed, mw.designN) * mw.wD + Math.min(o.executed, mw.runs) * mw.wX + Math.min(o.automated, mw.autoN) * mw.wA;
+        else earned += o.designed * W.wD + o.executed * W.wX + o.automated * W.wA;
+      });
+      OT_PHASES.forEach(k => { if (otNow[k] != null) earned += (W.ot[k] || 0) * otNow[k] / 100; });
+      return { ...r, designed: t.d, executed: t.x, automated: t.a, cumD, cumX, cumA, cumH, earned, otToDate: { ...otNow }, cumMods: JSON.parse(JSON.stringify(cum)), pct: Math.min(1, earned / W.V) };
     });
-    let plan = null, end = null;
-    const s = (p.team.length && p.start) ? (sched || schedule(p, {})) : null;
-    if (s) {
-      end = s.finish;
-      if (s.curve) {
-        plan = s.curve.map(([d, D, A, X]) => [d, Math.min(1, (D * W.wD + X * W.wX + A * W.wA) / W.V)]);
-        // per-module weights give a truer plan line when modules differ
-        if (s.weeks) {
-          const byWeek = {};
-          let cum = 0;
-          Object.keys(s.weeks).map(Number).sort((x, y) => x - y).forEach(w => {
-            Object.entries(s.weeks[w].mods || {}).forEach(([id, v]) => {
-              const mw = W.mods.find(m => m.id === id); if (!mw) return;
-              cum += v.design * mw.wD + v.exec * mw.wX + v.script * mw.wA;
-            });
-            byWeek[w] = Math.min(1, cum / W.V);
-          });
-          s._planByWeek = byWeek;
-        }
-        if (end) plan = plan.filter(x => x[0] <= end);
-      }
-    }
-    const planAt = d => {
-      if (s && s._planByWeek && s.weekStart) { const w = Math.floor(daysBetween(s.weekStart, d) / 7); let v = 0; for (const k in s._planByWeek) if (+k <= w) v = Math.max(v, s._planByWeek[k]); return v; }
-      if (!plan || !plan.length) return null; let v = 0; for (const [x, y] of plan) { if (x > d) break; v = y; } return v;
-    };
-    rows.forEach(r => { r.plannedPct = plan ? planAt(addDays(r.week, 6)) : null; });
+    rows.forEach(r => { r.plannedPct = src.weekStart ? planAt(addDays(r.week, 6)) : null; });
+    const keys = Object.keys(curve).map(Number).sort((x, y) => x - y);
+    const plan = src.weekStart ? [[src.start || p.start, 0], ...keys.map(w => [addDays(src.weekStart, w * 7 + 6), curve[w].frac])] : null;
+    const end = src.finish;
     const last = rows[rows.length - 1];
-    let spi = null, eff = null, forecast = null;
+    let spi = null, eff = null, forecast = null, forecastRaw = null;
+    const project = (spiX, from, startPct) => {
+      let cur = startPct, prevY = planAt(from);
+      for (const [d, y] of plan) {
+        if (d <= from) continue;
+        cur += Math.max(0, y - prevY) * spiX; prevY = Math.max(prevY, y);
+        if (cur >= 0.9999) return d;
+      }
+      const pe = plan[plan.length - 1][0], span = Math.max(1, daysBetween(src.start || p.start, pe));
+      return addDays(pe > from ? pe : from, Math.ceil((1 - cur) * span / spiX));
+    };
+    if (last) eff = last.cumH > 0 ? last.earned / last.cumH : null;
     if (last && last.plannedPct > 0) {
       spi = last.pct / last.plannedPct;
-      eff = last.cumH > 0 ? last.earned / last.cumH : null;
-      if (spi > 0 && plan && plan.length) {
-        // Early weeks are a weak signal: lean the forecast towards the plan until about a quarter
-        // of the work is done, and never let pace extrapolate beyond 1.25x or below 0.3x.
-        const conf = Math.min(1, last.pct / 0.25);
-        const spiF = Math.min(1.25, Math.max(0.3, 1 + (spi - 1) * conf));
+      if (spi > 0 && plan && plan.length > 1) {
         const from = addDays(last.week, 6);
-        let cur = last.pct, prevY = planAt(from);
-        for (const [d, y] of plan) {
-          if (d <= from) continue;
-          cur += Math.max(0, y - prevY) * spiF; prevY = Math.max(prevY, y);
-          if (cur >= 0.9999) { forecast = d; break; }
-        }
-        if (!forecast) {
-          const pe = plan[plan.length - 1][0], span = Math.max(1, daysBetween(p.start, pe));
-          forecast = addDays(pe > from ? pe : from, Math.ceil((1 - cur) * span / spiF));
-        }
+        // Current pace, taken at face value (bounded only to keep dates finite).
+        forecastRaw = project(Math.min(3, Math.max(0.1, spi)), from, last.pct);
+        // Smoothed: leans towards the plan until about a quarter of the work is done.
+        const conf = Math.min(1, last.pct / 0.25);
+        forecast = project(Math.min(1.25, Math.max(0.3, 1 + (spi - 1) * conf)), from, last.pct);
       }
     }
-    return { rows, plan, end, spi, eff, forecast, last, sched: s, W, designPerTC: W.wD, execPerRun: W.wX, autoPerTC: W.wA };
+    return { rows, plan, end, spi, eff, forecast, forecastRaw, last, sched: s, src, W, curve, baseline: !!p.baseline,
+      designPerTC: W.wD, execPerRun: W.wX, autoPerTC: W.wA };
   }
 
   // Everything a weekly status needs, as of the given logged week.
@@ -680,61 +753,53 @@ const ENGINE = (() => {
     const T = tracking(p, upto, sched);
     const row = T.rows.find(r => r.week === week);
     if (!row) return null;
-    const s = T.sched, W = T.W;
-    const wIdx = s && s.weekStart ? Math.floor(daysBetween(s.weekStart, week) / 7) : null;
-    const planWeek = wi => {
-      const out = { total: { design: 0, script: 0, exec: 0 }, mods: {} };
-      const x = s && s.weeks && s.weeks[wi];
-      if (x) Object.entries(x.mods || {}).forEach(([id, v]) => { out.mods[id] = v; out.total.design += v.design; out.total.script += v.script; out.total.exec += v.exec; });
-      return out;
-    };
-    const planTo = wi => {
-      const out = { total: { design: 0, script: 0, exec: 0 }, mods: {} };
-      if (s && s.weeks) Object.keys(s.weeks).map(Number).filter(k => k <= wi).forEach(k => {
-        Object.entries(s.weeks[k].mods || {}).forEach(([id, v]) => {
-          const o = out.mods[id] || (out.mods[id] = { design: 0, script: 0, exec: 0 });
-          o.design += v.design; o.script += v.script; o.exec += v.exec;
-          out.total.design += v.design; out.total.script += v.script; out.total.exec += v.exec;
-        });
-      });
-      return out;
-    };
-    const thisPlan = wIdx != null ? planWeek(wIdx) : null, toPlan = wIdx != null ? planTo(wIdx) : null, nextPlan = wIdx != null ? planWeek(wIdx + 1) : null;
-    // actuals to date by module
-    const act = {}, wk = {};
-    upto.forEach(r => Object.entries(rowMods(r)).forEach(([id, v]) => {
-      const o = act[id] || (act[id] = { designed: 0, automated: 0, executed: 0 });
-      o.designed += +v.designed || 0; o.automated += +v.automated || 0; o.executed += +v.executed || 0;
-      if (r.week === week) wk[id] = { designed: +v.designed || 0, automated: +v.automated || 0, executed: +v.executed || 0 };
-    }));
+    const src = T.src, W = T.W, curve = T.curve;
+    const wIdx = Math.floor(daysBetween(src.weekStart, week) / 7);
+    const weekPlan = wi => { const v = src.weeks[wi] || { mods: {}, ot: {} }; const tot = { design: 0, script: 0, exec: 0 };
+      Object.values(v.mods || {}).forEach(x => { tot.design += x.design; tot.script += x.script; tot.exec += x.exec; }); return { total: tot, mods: v.mods || {}, ot: v.ot || {} }; };
+    const cumAt = wi => { let c = null; for (const k of Object.keys(curve).map(Number).sort((x, y) => x - y)) { if (k <= wi) c = curve[k]; } return c || { frac: 0, ot: {}, mods: {} }; };
+    const thisPlan = weekPlan(wIdx), nextPlan = weekPlan(wIdx + 1), cAt = cumAt(wIdx);
+    const toPlan = { total: { design: 0, script: 0, exec: 0 }, mods: cAt.mods };
+    Object.values(cAt.mods).forEach(x => { toPlan.total.design += x.design; toPlan.total.script += x.script; toPlan.total.exec += x.exec; });
+    const weekCounts = rowMods(row);
+    const warnings = [];
     const mods = W.mods.map(m => {
-      const a = act[m.id] || { designed: 0, automated: 0, executed: 0 };
-      const pl = (toPlan && toPlan.mods[m.id]) || { design: 0, script: 0, exec: 0 };
-      const earnedA = a.designed * m.wD + a.executed * m.wX + a.automated * m.wA;
+      const a = row.cumMods[m.id] || { designed: 0, automated: 0, executed: 0 };
+      const pl = cAt.mods[m.id] || { design: 0, script: 0, exec: 0 };
+      if (m.designN > 0 && a.designed > m.designN + 1e-6) warnings.push(`${m.name}: ${Math.round(a.designed)} designed logged against a scope of ${Math.round(m.designN)}. Only the scope counts towards progress.`);
+      if (m.autoN > 0 && a.automated > m.autoN + 1e-6) warnings.push(`${m.name}: ${Math.round(a.automated)} automated logged against ${Math.round(m.autoN)} planned for automation. Only the scope counts.`);
+      if (m.runs > 0 && a.executed > m.runs + 1e-6) warnings.push(`${m.name}: ${Math.round(a.executed)} manual executions logged against ${Math.round(m.runs)} planned. Only the scope counts.`);
+      if (m.designN > 0 && a.automated > a.designed + 1e-6) warnings.push(`${m.name}: more test cases automated (${Math.round(a.automated)}) than designed (${Math.round(a.designed)}). Check the numbers.`);
+      const earnedA = Math.min(a.designed, m.designN) * m.wD + Math.min(a.executed, m.runs) * m.wX + Math.min(a.automated, m.autoN) * m.wA;
       const earnedP = pl.design * m.wD + pl.exec * m.wX + pl.script * m.wA;
       const total = m.designN * m.wD + m.runs * m.wX + m.autoN * m.wA;
       const spi = earnedP > 0.5 ? earnedA / earnedP : null;
-      const status = earnedP <= 0.5 ? (earnedA > 0 ? 'ahead' : 'notstarted') : spi >= 0.97 ? 'ok' : spi >= 0.85 ? 'risk' : 'no';
-      return { ...m, act: a, week: wk[m.id] || { designed: 0, automated: 0, executed: 0 }, plan: pl, weekPlan: (thisPlan && thisPlan.mods[m.id]) || { design: 0, script: 0, exec: 0 },
-        next: (nextPlan && nextPlan.mods[m.id]) || { design: 0, script: 0, exec: 0 }, earnedA, earnedP, total, pctDone: total ? Math.min(1, earnedA / total) : 0, spi, status };
+      const status = earnedP <= 0.5 ? (earnedA > 0.5 ? 'ahead' : 'notstarted') : spi >= 0.97 ? 'ok' : spi >= 0.85 ? 'risk' : 'no';
+      const wk = weekCounts[m.id] || {};
+      return { ...m, act: a, week: { designed: nn(wk.designed), automated: nn(wk.automated), executed: nn(wk.executed) }, plan: pl, weekPlan: thisPlan.mods[m.id] || { design: 0, script: 0, exec: 0 },
+        next: nextPlan.mods[m.id] || { design: 0, script: 0, exec: 0 }, earnedA, earnedP, total, pctDone: total ? Math.min(1, earnedA / total) : 0, spi, status };
     });
-    const legacy = act._all || null;
+    // one-time work: % done to date vs % planned to date
+    const ot = OT_PHASES.filter(k => (W.ot[k] || 0) > 0.01).map(k => ({ key: k, hours: W.ot[k], done: row.otToDate[k] != null ? row.otToDate[k] : null, planned: Math.min(100, 100 * (cAt.ot[k] || 0) / W.ot[k]), nextPlanned: Math.min(100, 100 * ((cAt.ot[k] || 0) + (nextPlan.ot[k] || 0)) / W.ot[k]) }));
     const totals = {
       scope: { design: W.mods.reduce((t, m) => t + m.designN, 0), automate: W.mods.reduce((t, m) => t + m.autoN, 0), exec: W.mods.reduce((t, m) => t + m.runs, 0) },
       week: { designed: row.designed, automated: row.automated, executed: row.executed },
       toDate: { designed: row.cumD, automated: row.cumA, executed: row.cumX }
     };
     const weekEnd = addDays(week, 6);
-    const ms = s && s.ms ? Object.entries(s.ms).filter(([k, v]) => !k.endsWith(':done') && v.date > weekEnd && v.date <= addDays(weekEnd, 14)).map(([k, v]) => v).sort((x, y) => x.date < y.date ? -1 : 1) : [];
+    const ms = T.sched && T.sched.ms ? Object.entries(T.sched.ms).filter(([k, v]) => !k.endsWith(':done') && v.date > weekEnd && v.date <= addDays(weekEnd, 14)).map(([, v]) => v).sort((x, y) => x.date < y.date ? -1 : 1) : [];
+    // Status uses the current pace at face value.
     let st = 'ok';
     if (T.spi != null) st = T.spi >= 0.97 ? 'ok' : T.spi >= 0.85 ? 'risk' : 'no';
-    const late = p.end && T.forecast && T.forecast > p.end ? daysBetween(p.end, T.forecast) : 0;
-    if (late > 0) { const span = Math.max(1, daysBetween(p.start, p.end)); st = late / span > 0.1 ? 'no' : (st === 'ok' ? 'risk' : st); }
-    return { week, weekEnd, weekNo: wIdx != null ? wIdx + 1 : null, row, T, mods, legacy, totals, thisPlan, toPlan, nextPlan, ms, status: st, late,
-      hoursWeek: +row.hours || 0, hoursToDate: row.cumH, spi: T.spi, eff: T.eff, forecast: T.forecast, plannedFinish: T.end };
+    const target = p.end || src.end;
+    const late = target && T.forecastRaw && T.forecastRaw > target ? daysBetween(target, T.forecastRaw) : 0;
+    if (late > 0) { const span = Math.max(1, daysBetween(p.start, target)); st = late / span > 0.1 ? 'no' : (st === 'ok' ? 'risk' : st); }
+    return { week, weekEnd, weekNo: wIdx + 1, row, T, mods, ot, totals, thisPlan, toPlan, nextPlan, ms, status: st, late, warnings,
+      hoursWeek: nn(row.hours), hoursToDate: row.cumH, spi: T.spi, eff: T.eff, forecast: T.forecastRaw, forecastSmoothed: T.forecast,
+      plannedFinish: T.end, baseline: p.baseline ? { at: p.baseline.at, reason: p.baseline.reason } : null, history: p.baselineHistory || [] };
   }
 
-  return { defaults, defaultHolidays, newModule, newResource, newProject, migrate, effort, oneTimeBuckets, analyse, capacityIn, schedule, tracking, weekReport,
+  return { defaults, defaultHolidays, newModule, newResource, newProject, migrate, effort, oneTimeBuckets, analyse, capacityIn, schedule, tracking, weekReport, compactPlan, makeBaseline, baselineVariance, generateHolidays, OT_PHASES,
     toS, toD, addDays, dow, mondayOf, daysBetween, uid, hireTeam, CATS };
 })();
 if (typeof module !== 'undefined' && module.exports) module.exports = ENGINE;
