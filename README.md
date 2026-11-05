@@ -46,7 +46,12 @@ The best and worst cases are applied to the base estimate; contingency is not st
 
 ## Baseline
 
-Once the estimate is agreed, freeze it as the baseline on the Tracking tab. Tracking, the
+Once the estimate is agreed, freeze it as the baseline on the Tracking tab. Lateness is
+measured against the baselined target even if the target date is later edited (the change
+is reported). Modules added after the baseline are tracked separately and listed in status
+emails as work pending a change request; they don't count as progress until you re-baseline.
+
+ Tracking, the
 forecast and status emails then measure against the baseline, and later changes to the plan
 show as variances (finish date, effort, scope). Re-baselining needs a reason and is kept in a
 history that the status email mentions.
@@ -58,7 +63,9 @@ team hours, highlights and blockers. Progress is earned at each module's own est
 and compared with the baseline (or the current plan if none is frozen), giving a schedule
 index, a per-module status and a forecast finish at the current pace (a smoothed forecast is
 shown next to it in early weeks). Setup, framework, common methods and CI/CD progress are
-logged as % complete, so those weeks count too. Counts above a module's scope are capped
+logged as % complete, so those weeks count too. Hours are logged per person and compared
+with the earned-per-logged-hour ratio the plan itself implies. In the first weeks (under 10%
+done) a slow start is reported as "At risk" with the pace explained, not "Behind". Counts above a module's scope are capped
 and flagged.
 
 The status email builds a draft for any logged week: overall status, this week vs plan,
@@ -101,6 +108,7 @@ macOS/Linux: `HOST=0.0.0.0 BASIC_AUTH=alice:pw1,bob:pw2 npm start`
 ```
 npm run build   # rebuild public/index.html and dist/claude-artifact.html from src/
 npm test        # run the engine and server tests
+npm run test:ui # browser tests (needs Playwright: npm i -D playwright && npx playwright install chromium)
 ```
 
 Edit files in `src/`, never `public/index.html` directly: the build overwrites it.
@@ -115,7 +123,7 @@ Edit files in `src/`, never `public/index.html` directly: the build overwrites i
 | `public/vendor/` | SheetJS 0.18.5 for Excel export. |
 | `server.js` | Zero-dependency Node server: static files plus a JSON document API. |
 | `scripts/build.js` | Assembles the two builds. |
-| `test/` | Engine and server tests (`node --test`). |
+| `test/` | Engine, server and browser tests (`node --test`). |
 
 The same `src/` code also runs as a claude.ai artifact, where storage and downloads come
 from the artifact platform instead of `public/store.js`. `dist/claude-artifact.html` is
@@ -147,10 +155,16 @@ For HTTPS, put it behind your usual reverse proxy (IIS, nginx).
 ## Notes
 
 - Several people can work at once. Changes from others appear within about 4 seconds.
-  If two people change the same project's plan at the same time, the second to save is
-  told and chooses whose version to keep; nothing is overwritten silently. Weekly actuals
-  are saved field by field, so people logging different modules don't collide.
-- The server checks the shape of saved projects and actuals and rejects bad data.
+  Plan edits are merged: if two people change different things (say, two modules), both
+  changes are kept automatically. Only when both change the same thing is the second person
+  shown both values and asked which to keep. Weekly actuals are saved field by field; a
+  week that already exists is never replaced, and changing a field a colleague just changed
+  asks first (with "keep both" for notes).
+- The server checks saved projects and actuals strictly (real dates, counts, percentages),
+  only accepts projects and their weekly actuals, and ignores keys that could tamper with
+  the server itself. Without logins it only answers requests addressed to localhost.
+- Results are calculated in a background worker, so editing a large plan doesn't freeze
+  the page; copies, exports and baselines always use freshly calculated numbers.
 - Basic auth sends the password with every request, so use HTTPS if the server is
   reachable outside a trusted network.
 - The page loads its fonts from Google Fonts; without internet it falls back to system fonts.

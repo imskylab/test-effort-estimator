@@ -301,3 +301,78 @@ test('team time for pricing includes everyone booked, not just effort', () => {
   const A = E.analyse(p);
   assert.ok(A.teamTime && A.teamTime.hours > A.e.total, `team time ${A.teamTime && A.teamTime.hours} vs effort ${A.e.total}`);
 });
+
+/* ---------- second review fixes ---------- */
+function onPlanActuals(p, s, weeks) {
+  const T0 = E.tracking(p, [], s), ids = p.modules.map(m => m.id), acts = [], cum = {};
+  Object.keys(T0.src.weeks).map(Number).sort((a, b) => a - b).slice(0, weeks).forEach(w => {
+    const v = T0.src.weeks[w], mods = {};
+    ids.forEach(id => { const m = v.mods[id] || { design: 0, script: 0, exec: 0 }; mods[id] = { designed: m.design, automated: m.script, executed: m.exec }; });
+    Object.entries(v.ot).forEach(([k, h]) => { cum[k] = (cum[k] || 0) + h; });
+    const ot = {}; Object.keys(cum).forEach(k => { ot[k] = Math.min(100, 100 * cum[k] / T0.W.ot[k]); });
+    acts.push({ week: E.addDays(T0.src.weekStart, w * 7), hours: 100, mods, ot });
+  });
+  return acts;
+}
+
+test('a project exactly on plan forecasts its planned finish and is on track', () => {
+  const p = exampleTeam(project());
+  const s = E.schedule(p);
+  p.end = s.finish; p.baseline = E.makeBaseline(p, s, 'agreed');
+  const acts = onPlanActuals(p, s, 10);
+  const R = E.weekReport(p, acts, s, acts[9].week);
+  assert.ok(Math.abs(R.spi - 1) < 0.01);
+  assert.strictEqual(R.forecast, R.plannedFinish);
+  assert.strictEqual(R.status, 'ok');
+  assert.strictEqual(R.late, 0);
+});
+
+test('moving the target date does not hide lateness against the baseline', () => {
+  const p = trackedProject(); const [w] = p.modules.map(m => m.id);
+  const s = E.schedule(p);
+  p.end = s.finish; p.baseline = E.makeBaseline(p, s, 'agreed');
+  const weeks = ['2026-11-16', '2026-11-23', '2026-11-30', '2026-12-07', '2026-12-14', '2026-12-21', '2026-12-28', '2027-01-04'];
+  const acts = weeks.map(week => ({ week, hours: 100, mods: { [w]: { designed: 5 } }, ot: { setup: 100, framework: 30 } }));
+  const before = E.weekReport(p, acts, null, weeks[7]);
+  p.end = E.addDays(p.end, 120);
+  const after = E.weekReport(p, acts, null, weeks[7]);
+  assert.ok(before.late > 0);
+  assert.strictEqual(after.late, before.late, 'still late against the baselined target');
+  assert.deepStrictEqual(after.targetChanged, { from: p.baseline.end, to: p.end });
+});
+
+test('work on modules added after the baseline is reported, not counted as progress', () => {
+  const p = trackedProject(); const [w] = p.modules.map(m => m.id);
+  p.baseline = E.makeBaseline(p, E.schedule(p), 'agreed');
+  const extra = Object.assign(E.newModule('Added later', 3), { tcs: 400 });
+  p.modules.push(extra);
+  const acts = [{ week: '2026-11-16', hours: 100, mods: { [w]: { designed: 10 }, [extra.id]: { designed: 300, automated: 200 } } }];
+  const withExtra = E.tracking(p, acts).rows[0].pct;
+  const withoutExtra = E.tracking(p, [{ week: '2026-11-16', hours: 100, mods: { [w]: { designed: 10 } } }]).rows[0].pct;
+  assert.strictEqual(withExtra, withoutExtra);
+  const R = E.weekReport(p, acts, null, '2026-11-16');
+  assert.strictEqual(R.outside.length, 1);
+  assert.strictEqual(R.outside[0].act.designed, 300);
+});
+
+test('first weeks can be at risk but not behind', () => {
+  const p = trackedProject(); const [w] = p.modules.map(m => m.id);
+  const R = E.weekReport(p, [{ week: '2026-11-16', hours: 100, mods: { [w]: { designed: 1 } } }], null, '2026-11-16');
+  assert.ok(R.early);
+  assert.notStrictEqual(R.status, 'no');
+});
+
+test('productivity is compared with what the plan implies, not with 1.0', () => {
+  const p = exampleTeam(project());
+  const s = E.schedule(p);
+  p.baseline = E.makeBaseline(p, s, 'agreed');
+  const acts = onPlanActuals(p, s, 6);
+  // log the hours the team is actually booked for
+  const T = E.tracking(p, acts, s);
+  assert.ok(T.effPlan > 0 && T.effPlan < 1, 'booked hours exceed earned effort in the plan');
+  acts.forEach(a => { a.hours = 0; });
+  const c = E.capacityIn(p, p.team, p.start, E.addDays(acts[5].week, 6));
+  acts[5].hours = c.ded.gross - c.ded.holidays - c.ded.leave;
+  const T2 = E.tracking(p, acts, s);
+  assert.ok(Math.abs(T2.effIndex - 1) < 0.05, `on-plan team logging booked hours scores about 1.0, got ${T2.effIndex}`);
+});

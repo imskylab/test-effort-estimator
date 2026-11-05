@@ -13,7 +13,8 @@ const root = path.join(__dirname, '..');
 const read = f => fs.readFileSync(path.join(root, 'src', f), 'utf8');
 const head = read('head.html');
 const body = read('body.html');
-const app = read('engine.js') + '\n' + read('ui.js');
+const engine = read('engine.js'), ui = read('ui.js');
+const app = engine + '\n' + ui;
 
 // Fail the build on a script syntax error rather than shipping a blank page.
 try { new Function(app); } catch (e) { console.error('Script syntax error:', e.message); process.exit(1); }
@@ -31,8 +32,11 @@ ${head.replace(/<meta name="claude:viewport-fit-sides"[^>]*>\n?/, '')}</head>
 ${body}
 <script src="/vendor/xlsx.full.min.js"></script>
 <script src="/store.js"></script>
+<script id="engine-src">
+${engine}
+</script>
 <script>
-${app}
+${ui}
 </script>
 </body>
 </html>
@@ -40,8 +44,11 @@ ${app}
 
 const artifact = `${head}${body}
 <script src="${XLSX_CDN}"></script>
+<script id="engine-src">
+${engine}
+</script>
 <script>
-${app}
+${ui}
 </script>
 `;
 

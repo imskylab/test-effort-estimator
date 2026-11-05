@@ -206,7 +206,7 @@ tr.sel td{background:var(--accent-soft)}
 
 <script src="/vendor/xlsx.full.min.js"></script>
 <script src="/store.js"></script>
-<script>
+<script id="engine-src">
 /* ===== Estimation engine (pure functions, no DOM) ===== */
 const ENGINE = (() => {
   const DAY = 86400000;
@@ -265,6 +265,7 @@ const ENGINE = (() => {
       teamMix: { Junior: 20, Mid: 50, Senior: 30, Expert: 0 },
       hireSkill: 'Working knowledge',
       hireLocation: 'India',
+      hireLeadDays: 10,
       leadSpan: 8,
       managerAbove: 20,
       managerAlloc: 50,
@@ -546,10 +547,17 @@ const ENGINE = (() => {
     out.slice().sort((a, b) => b.r - a.r).forEach(x => { if (left > 0) { x.n++; left--; } });
     return out.filter(x => x.n > 0);
   }
+  // Extra people join after a hiring / onboarding lead time (working days from the start).
+  function hireStart(p) {
+    let d = p.start, n = Math.max(0, Math.round(+p.a.hireLeadDays || 0));
+    while (n > 0) { d = addDays(d, 1); if (p.a.workDays.includes(dow(d))) n--; }
+    return n === 0 && (+p.a.hireLeadDays || 0) > 0 ? d : '';
+  }
   function hireTeam(p, n, prefix = 'New hire') {
+    const from = hireStart(p);
     const heads = splitHeads(n, hireProfiles(p));
     const t = []; let i = 1;
-    heads.forEach(h => { for (let k = 0; k < h.n; k++) t.push({ id: 'h' + i, name: prefix + ' ' + (i++), role: 'Engineer', activity: 'Both', level: h.level, skill: p.a.hireSkill, alloc: 100, location: p.a.hireLocation, start: '', end: '', leaves: [] }); });
+    heads.forEach(h => { for (let k = 0; k < h.n; k++) t.push({ id: 'h' + i, name: prefix + ' ' + (i++), role: 'Engineer', activity: 'Both', level: h.level, skill: p.a.hireSkill, alloc: 100, location: p.a.hireLocation, start: from, end: '', leaves: [] }); });
     return t;
   }
 
@@ -889,6 +897,11 @@ const ENGINE = (() => {
     });
     return out;
   }
+  // Hours logged in a week: per person when split, else the older single total.
+  function hoursOf(r) {
+    if (r.hoursBy && Object.keys(r.hoursBy).length) return Object.values(r.hoursBy).reduce((t, v) => t + nn(v), 0);
+    return nn(r.hours);
+  }
   function rowMods(r) {
     if (r.mods && Object.keys(r.mods).length) return r.mods;
     if ((+r.designed || 0) + (+r.executed || 0) + (+r.automated || 0) > 0) return { _all: { designed: +r.designed || 0, executed: +r.executed || 0, automated: +r.automated || 0 } };
@@ -912,35 +925,56 @@ const ENGINE = (() => {
         o.designed += nn(v.designed); o.automated += nn(v.automated); o.executed += nn(v.executed);
         t.d += nn(v.designed); t.x += nn(v.executed); t.a += nn(v.automated);
       });
-      cumD += t.d; cumX += t.x; cumA += t.a; cumH += nn(r.hours);
+      cumD += t.d; cumX += t.x; cumA += t.a; cumH += hoursOf(r);
       Object.entries(r.ot || {}).forEach(([k, v]) => { if (v !== '' && v != null) otNow[k] = Math.min(100, nn(v)); });
       // earned to date, never more than the scope of each module
       let earned = 0;
       Object.entries(cum).forEach(([id, o]) => {
         const mw = W.mods.find(m => m.id === id);
         if (mw) earned += Math.min(o.designed, mw.designN) * mw.wD + Math.min(o.executed, mw.runs) * mw.wX + Math.min(o.automated, mw.autoN) * mw.wA;
-        else earned += o.designed * W.wD + o.executed * W.wX + o.automated * W.wA;
+        else if (id === '_all') earned += o.designed * W.wD + o.executed * W.wX + o.automated * W.wA; // logged before modules existed
+        // modules that aren't in the plan being measured against (added after the baseline) earn nothing here;
+        // they are reported separately as work outside the baseline
       });
       OT_PHASES.forEach(k => { if (otNow[k] != null) earned += (W.ot[k] || 0) * otNow[k] / 100; });
       return { ...r, designed: t.d, executed: t.x, automated: t.a, cumD, cumX, cumA, cumH, earned, otToDate: { ...otNow }, cumMods: JSON.parse(JSON.stringify(cum)), pct: Math.min(1, earned / W.V) };
     });
     rows.forEach(r => { r.plannedPct = src.weekStart ? planAt(addDays(r.week, 6)) : null; });
     const keys = Object.keys(curve).map(Number).sort((x, y) => x - y);
-    const plan = src.weekStart ? [[src.start || p.start, 0], ...keys.map(w => [addDays(src.weekStart, w * 7 + 6), curve[w].frac])] : null;
+    // weekly plan points; the last one sits on the planned finish day, not the Sunday after it
+    const plan = src.weekStart ? [[src.start || p.start, 0], ...keys.map(w => {
+      let d = addDays(src.weekStart, w * 7 + 6);
+      if (src.finish && d > src.finish && addDays(src.weekStart, w * 7) <= src.finish) d = src.finish;
+      return [d, curve[w].frac];
+    })] : null;
     const end = src.finish;
     const last = rows[rows.length - 1];
     let spi = null, eff = null, forecast = null, forecastRaw = null;
+    const workday = d => { let x = d; for (let i = 0; i < 7 && !p.a.workDays.includes(dow(x)); i++) x = addDays(x, 1); return x; };
     const project = (spiX, from, startPct) => {
-      let cur = startPct, prevY = planAt(from);
+      let cur = startPct, prevY = planAt(from), prevD = from;
       for (const [d, y] of plan) {
         if (d <= from) continue;
-        cur += Math.max(0, y - prevY) * spiX; prevY = Math.max(prevY, y);
-        if (cur >= 0.9999) return d;
+        const step = Math.max(0, y - prevY) * spiX;
+        if (cur + step >= 0.9999 && step > 0) {
+          // finish part-way through this step, to the day
+          const t = (0.9999 - cur) / step;
+          return workday(addDays(prevD, Math.max(0, Math.round(t * daysBetween(prevD, d)))));
+        }
+        cur += step; prevY = Math.max(prevY, y); prevD = d;
       }
       const pe = plan[plan.length - 1][0], span = Math.max(1, daysBetween(src.start || p.start, pe));
       return addDays(pe > from ? pe : from, Math.ceil((1 - cur) * span / spiX));
     };
     if (last) eff = last.cumH > 0 ? last.earned / last.cumH : null;
+    // What earned-per-logged-hour the plan itself implies: planned earned hours divided by the
+    // hours the team is booked for (timesheets include meetings, holidays aside, ramp-up and waiting).
+    let effPlan = null;
+    if (last && p.team.length && p.start) {
+      const c = capacityIn(p, p.team, p.start, addDays(last.week, 6));
+      const booked = c.ded.gross - c.ded.holidays - c.ded.leave;
+      if (booked > 0 && last.plannedPct > 0) effPlan = last.plannedPct * W.V / booked;
+    }
     if (last && last.plannedPct > 0) {
       spi = last.pct / last.plannedPct;
       if (spi > 0 && plan && plan.length > 1) {
@@ -952,7 +986,7 @@ const ENGINE = (() => {
         forecast = project(Math.min(1.25, Math.max(0.3, 1 + (spi - 1) * conf)), from, last.pct);
       }
     }
-    return { rows, plan, end, spi, eff, forecast, forecastRaw, last, sched: s, src, W, curve, baseline: !!p.baseline,
+    return { rows, plan, end, spi, eff, effPlan, effIndex: eff != null && effPlan ? eff / effPlan : null, forecast, forecastRaw, last, sched: s, src, W, curve, baseline: !!p.baseline,
       designPerTC: W.wD, execPerRun: W.wX, autoPerTC: W.wA };
   }
 
@@ -997,28 +1031,40 @@ const ENGINE = (() => {
     };
     const weekEnd = addDays(week, 6);
     const ms = T.sched && T.sched.ms ? Object.entries(T.sched.ms).filter(([k, v]) => !k.endsWith(':done') && v.date > weekEnd && v.date <= addDays(weekEnd, 14)).map(([, v]) => v).sort((x, y) => x.date < y.date ? -1 : 1) : [];
-    // Status uses the current pace at face value.
+    // Work on modules that aren't in the baseline: shown separately, not counted as progress.
+    const outside = p.modules.filter(m => !W.mods.some(x => x.id === m.id)).map(m => ({ id: m.id, name: m.name,
+      act: row.cumMods[m.id] || { designed: 0, automated: 0, executed: 0 }, week: { designed: nn((weekCounts[m.id] || {}).designed), automated: nn((weekCounts[m.id] || {}).automated), executed: nn((weekCounts[m.id] || {}).executed) } }));
+    // Lateness is measured against the baselined target; a moved target is reported, not absorbed.
+    const target = (p.baseline && p.baseline.end) || p.end || '';
+    const targetChanged = p.baseline && p.baseline.end && (p.end || '') !== p.baseline.end ? { from: p.baseline.end, to: p.end || '' } : null;
+    // Status uses the current pace at face value, with two allowances: on-plan pace (0.97+) isn't
+    // flagged for a couple of days of rounding, and the first weeks (under 10% done, fewer than 4
+    // weeks logged) can be "At risk" but not "Behind".
     let st = 'ok';
     if (T.spi != null) st = T.spi >= 0.97 ? 'ok' : T.spi >= 0.85 ? 'risk' : 'no';
-    const target = p.end || src.end;
-    const late = target && T.forecastRaw && T.forecastRaw > target ? daysBetween(target, T.forecastRaw) : 0;
+    let late = target && T.forecastRaw && T.forecastRaw > target ? daysBetween(target, T.forecastRaw) : 0;
+    if (late > 0 && T.spi != null && T.spi >= 0.97 && late <= 3) late = 0;
     if (late > 0) { const span = Math.max(1, daysBetween(p.start, target)); st = late / span > 0.1 ? 'no' : (st === 'ok' ? 'risk' : st); }
-    return { week, weekEnd, weekNo: wIdx + 1, row, T, mods, ot, totals, thisPlan, toPlan, nextPlan, ms, status: st, late, warnings,
-      hoursWeek: nn(row.hours), hoursToDate: row.cumH, spi: T.spi, eff: T.eff, forecast: T.forecastRaw, forecastSmoothed: T.forecast,
+    const early = row.pct < 0.10 && T.rows.length < 4;
+    if (early && st === 'no') st = 'risk';
+    return { week, weekEnd, weekNo: wIdx + 1, row, T, mods, ot, outside, totals, thisPlan, toPlan, nextPlan, ms, status: st, late, warnings, target, targetChanged, early,
+      hoursWeek: hoursOf(row), hoursToDate: row.cumH, spi: T.spi, eff: T.eff, effPlan: T.effPlan, effIndex: T.effIndex, forecast: T.forecastRaw, forecastSmoothed: T.forecast,
       plannedFinish: T.end, baseline: p.baseline ? { at: p.baseline.at, reason: p.baseline.reason } : null, history: p.baselineHistory || [] };
   }
 
-  return { defaults, defaultHolidays, newModule, newResource, newProject, migrate, effort, oneTimeBuckets, analyse, capacityIn, schedule, tracking, weekReport, compactPlan, makeBaseline, baselineVariance, generateHolidays, OT_PHASES,
+  return { defaults, defaultHolidays, newModule, newResource, newProject, migrate, effort, oneTimeBuckets, analyse, capacityIn, schedule, tracking, weekReport, compactPlan, makeBaseline, baselineVariance, generateHolidays, OT_PHASES, hoursOf,
     toS, toD, addDays, dow, mondayOf, daysBetween, uid, hireTeam, CATS };
 })();
 if (typeof module !== 'undefined' && module.exports) module.exports = ENGINE;
 
+</script>
+<script>
 /* ===== UI ===== */
 const E = ENGINE;
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const nf0 = new Intl.NumberFormat('en-IN', { maximumFractionDigits: 0 });
-const nf1 = new Intl.NumberFormat('en-IN', { maximumFractionDigits: 1 });
+const nf0 = new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 });
+const nf1 = new Intl.NumberFormat('en-US', { maximumFractionDigits: 1 });
 const H = h => nf0.format(Math.round(h || 0));
 const PD = h => nf1.format((h || 0) / (S.P ? S.P.a.hoursPerDay : 8));
 const pct = v => nf0.format(Math.round((v || 0) * 100)) + '%';
@@ -1033,12 +1079,65 @@ const S = { db: null, dl: null, list: [], id: null, P: null, actuals: [], tab: '
 /* ---------- persistence ---------- */
 let saveTimer = null;
 function touch() {
-  S.A = null;
+  S.editSeq = (S.editSeq || 0) + 1;
+  S.Aprev = S.A || S.Aprev; S.A = null; S.calculating = false;
   S.saving = 'Unsaved';
   clearTimeout(saveTimer);
   saveTimer = setTimeout(saveNow, 700);
   renderSoon();
 }
+/* Plans are merged in "units": scalar fields, each factor group, each module / person / holiday /
+ * window by id, the baseline and its history. Units changed by only one side are taken from that
+ * side; units changed by both, differently, are conflicts the user decides. */
+const ARRAYS = ['modules', 'team', 'holidays', 'downtimes'];
+function planUnits(P) {
+  const u = {};
+  ['name', 'client', 'start', 'end', 'locations', 'baseline', 'baselineHistory'].forEach(k => { if (P[k] !== undefined) u[k] = P[k]; });
+  Object.entries(P.notes || {}).forEach(([k, v]) => { u['notes.' + k] = v; });
+  Object.entries(P.a || {}).forEach(([k, v]) => { u['a.' + k] = v; });
+  ARRAYS.forEach(k => (P[k] || []).forEach((x, i) => { u[k + '#' + (x.id || 'i' + i)] = x; }));
+  return u;
+}
+const same = (x, y) => JSON.stringify(x) === JSON.stringify(y);
+function merge3(base, mine, theirs) {
+  const B = planUnits(base), M = planUnits(mine), T = planUnits(theirs);
+  const keys = new Set([...Object.keys(B), ...Object.keys(M), ...Object.keys(T)]);
+  const out = {}, conflicts = [];
+  keys.forEach(k => {
+    const b = B[k], m = M[k], t = T[k];
+    if (same(m, t)) { if (m !== undefined) out[k] = m; }
+    else if (same(m, b)) { if (t !== undefined) out[k] = t; }
+    else if (same(t, b)) { if (m !== undefined) out[k] = m; }
+    else { conflicts.push({ key: k, mine: m, theirs: t }); if (m !== undefined) out[k] = m; }
+  });
+  return { units: out, conflicts, order: { mine, theirs } };
+}
+function buildPlan(units, mine, theirs) {
+  const P = JSON.parse(JSON.stringify(mine));
+  ['name', 'client', 'start', 'end', 'locations', 'baseline', 'baselineHistory'].forEach(k => { if (k in units) P[k] = units[k]; else delete P[k]; });
+  P.notes = {}; P.a = Object.assign({}, mine.a);
+  Object.keys(P.a).forEach(k => { if (!('a.' + k in units)) delete P.a[k]; });
+  Object.entries(units).forEach(([k, v]) => { if (k.startsWith('notes.')) P.notes[k.slice(6)] = v; if (k.startsWith('a.')) P.a[k.slice(2)] = v; });
+  ARRAYS.forEach(k => {
+    const ids = [...(theirs[k] || []), ...(mine[k] || [])].map((x, i) => k + '#' + (x.id || 'i' + i));
+    const seen = new Set();
+    P[k] = ids.filter(id => !seen.has(id) && seen.add(id) && id in units).map(id => units[id]);
+  });
+  return P;
+}
+function unitLabel(key, M) {
+  const [k, id] = key.split('#');
+  const find = arr => ((M.mine && M.mine[arr]) || []).concat((M.theirs && M.theirs[arr]) || []).find(x => (x.id || '') === id);
+  if (k === 'modules') return `Module “${(find('modules') || {}).name || 'removed module'}”`;
+  if (k === 'team') return `Team member “${(find('team') || {}).name || 'removed person'}”`;
+  if (k === 'holidays') { const h = find('holidays') || {}; return `Holiday ${h.name || ''} ${h.date ? fd(h.date) : ''}`.trim(); }
+  if (k === 'downtimes') return 'A blocked window';
+  if (key.startsWith('a.')) return `Factor “${key.slice(2)}”`;
+  if (key.startsWith('notes.')) return `Notes: ${key.slice(6)}`;
+  return { name: 'Project name', client: 'Client', start: 'Start date', end: 'Target end date', locations: 'Locations', baseline: 'Baseline', baselineHistory: 'Baseline history' }[key] || key;
+}
+const brief = v => v === undefined ? 'removed' : typeof v === 'object' ? (v && v.tcs != null ? `${v.tcs} test cases` : v && v.alloc != null ? `${v.activity}, ${v.level}, ${v.alloc}%` : v && v.at ? `frozen ${fd(v.at)}` : 'changed') : String(v) === '' ? 'empty' : String(v).slice(0, 40);
+
 async function saveNow() {
   if (!S.P || !S.id) return;
   if (S.local || !S.db) { S.saving = S.local ? 'Not saved (offline view)' : ''; const l = S.list.find(x => x.id === S.id); if (l) { l.name = S.P.name; l.client = S.P.client; } renderHeader(); return; }
@@ -1048,43 +1147,76 @@ async function saveNow() {
   try {
     // Has anyone saved since we loaded? (The self-hosted server also checks this atomically.)
     const cur = await ref.get();
-    if (cur.exists && cur.data().rev && S.rev && cur.data().rev !== S.rev) return setConflict(cur.data());
-    const rev = E.uid();
-    S.pendingRev = rev;
-    const body = { name: S.P.name, client: S.P.client || '', updatedAt: Date.now(), rev, data: JSON.parse(JSON.stringify(S.P)) };
-    if (S.rev) body.prevRev = S.rev;
-    await ref.set(body);
-    S.rev = rev; S.saving = 'Saved';
+    if (cur.exists && cur.data().rev && S.rev && cur.data().rev !== S.rev) return mergeWith(cur.data());
+    await writePlan(ref);
   } catch (e) {
-    if (e.code === 'conflict') { S.pendingRev = null; return setConflict(e.current); }
+    if (e.code === 'conflict') { S.pendingRev = null; return mergeWith(e.current); }
     S.saving = e.code === 'invalid_argument' ? (e.message && !/^invalid/.test(e.message) ? 'Not saved: ' + e.message : 'Read-only: you can view but not save') : e.code === 'quota_exceeded' ? 'Storage full: delete old projects' : 'Save failed, will retry on next edit';
   }
   S.pendingRev = null;
   renderHeader();
 }
-function setConflict(theirs) {
-  S.conflict = { theirs, by: theirs && theirs.updatedBy, at: theirs && theirs.updatedAt };
+async function writePlan(ref, note) {
+  const rev = E.uid();
+  S.pendingRev = rev;
+  const data = JSON.parse(JSON.stringify(S.P));
+  const body = { name: S.P.name, client: S.P.client || '', updatedAt: Date.now(), rev, data };
+  if (S.rev) body.prevRev = S.rev;
+  await ref.set(body);
+  S.rev = rev; S.baseP = data; S.saving = note || 'Saved';
+}
+// Someone else saved first: merge their changes with ours; ask only about fields both changed.
+async function mergeWith(theirsDoc) {
+  let theirs;
+  try { theirs = migrate(JSON.parse(JSON.stringify(theirsDoc.data))); } catch (e) { return setConflict(theirsDoc, []); }
+  const base = S.baseP || theirs;
+  const M = merge3(base, S.P, theirs);
+  if (!M.conflicts.length) {
+    S.P = buildPlan(M.units, S.P, theirs); S.A = null; S.Aprev = null;
+    S.rev = theirsDoc.rev;
+    try { await writePlan(S.db.doc('projects/' + S.id), `Saved, merged with ${theirsDoc.updatedBy || 'a colleague'}’s changes`); }
+    catch (e) { if (e.code === 'conflict') return mergeWith(e.current); S.saving = 'Save failed, will retry on next edit'; }
+    S.pendingRev = null; renderAll(); return;
+  }
+  setConflict(theirsDoc, M.conflicts, M, theirs);
+}
+function setConflict(theirsDoc, conflicts, M, theirs) {
+  S.conflict = { theirs: theirsDoc, theirsP: theirs, by: theirsDoc && theirsDoc.updatedBy, at: theirsDoc && theirsDoc.updatedAt, conflicts: conflicts || [], M };
   S.saving = 'Not saved';
   renderAll();
 }
 function conflictBanner() {
   const c = S.conflict; if (!c) return '';
   const when = c.at ? new Date(c.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
-  return `<div class="banner conflict" role="alert"><b>${esc(c.by || 'Someone else')} saved this project${when ? ' at ' + when : ''} while you had unsaved changes.</b> Your changes aren’t saved yet. Choose which version to keep:
+  const who = esc(c.by || 'Someone else');
+  if (!c.conflicts.length) return `<div class="banner conflict" role="alert"><b>${who} saved this project${when ? ' at ' + when : ''}, and it couldn’t be merged with your changes.</b>
     <div class="row" style="margin-top:8px"><button class="btn" data-act="conflict-theirs">Load their version (discard mine)</button><button class="btn danger" data-act="conflict-mine">Keep mine (overwrite theirs)</button></div></div>`;
+  return `<div class="banner conflict" role="alert"><b>${who} saved this project${when ? ' at ' + when : ''} while you were editing.</b> Their other changes have been merged with yours. You both changed:
+    <ul class="bul" style="margin:6px 0">${c.conflicts.map(x => `<li>${esc(unitLabel(x.key, c.M.order))}: yours <b>${esc(brief(x.mine))}</b>, theirs <b>${esc(brief(x.theirs))}</b></li>`).join('')}</ul>
+    <div class="row"><button class="btn" data-act="conflict-use-theirs">Use theirs for these</button><button class="btn" data-act="conflict-use-mine">Use mine for these</button></div></div>`;
+}
+async function resolveConflict(useMine) {
+  const c = S.conflict; if (!c) return;
+  const units = Object.assign({}, c.M.units);
+  c.conflicts.forEach(x => { const v = useMine ? x.mine : x.theirs; if (v === undefined) delete units[x.key]; else units[x.key] = v; });
+  S.P = buildPlan(units, S.P, c.theirsP); S.A = null; S.Aprev = null;
+  S.rev = c.theirs.rev; S.conflict = null;
+  try { await writePlan(S.db.doc('projects/' + S.id), 'Saved'); } catch (e) { if (e.code === 'conflict') return mergeWith(e.current); S.saving = 'Save failed'; }
+  S.pendingRev = null; renderAll();
 }
 function openProject(id) {
   if (S.unsubA) { S.unsubA(); S.unsubA = null; }
-  S.id = id; S.A = null; S.confirmDel = false; S.actuals = [];
+  S.id = id; S.A = null; S.Aprev = null; S.confirmDel = false; S.actuals = [];
   const l = S.list.find(x => x.id === id);
   S.loadError = ''; S.conflict = null;
-  try { S.P = l && l.data ? migrate(JSON.parse(JSON.stringify(l.data))) : null; }
+  try { S.P = l && l.data ? migrate(JSON.parse(JSON.stringify(l.data))) : null; S.baseP = S.P ? JSON.parse(JSON.stringify(S.P)) : null; }
   catch (e) { S.P = null; S.loadError = `“${(l && l.name) || 'This project'}” couldn’t be opened because its saved data is damaged. Pick another project, or restore it from the backups folder on the server.`; }
   S.rev = l ? l.rev : null;
   try { localStorage.setItem('tee.last', id); } catch (e) { }
   if (S.db && !S.local) {
     S.unsubA = S.db.collection('projects/' + id + '/actuals').onSnapshot(snap => {
       S.actuals = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+      S.actSeen = {}; S.actuals.forEach(r => seen(r.id, r));
       if (S.tab === 'tracking') renderSoon();
     }, err => { S.saving = 'Weekly actuals couldn’t be loaded' + (err && err.message ? ': ' + err.message : ''); renderHeader(); });
   } else {
@@ -1128,23 +1260,74 @@ async function deleteProject() {
 }
 function deepMerge(t, p) { for (const [k, v] of Object.entries(p)) { if (v && typeof v === 'object' && !Array.isArray(v) && t[k] && typeof t[k] === 'object') deepMerge(t[k], v); else t[k] = v; } return t; }
 async function createActual(row) {
-  if (!S.actuals.find(x => x.id === row.id)) S.actuals.push(row);
   if (S.db && !S.local) {
     const { id, ...body } = row;
-    try { await S.db.doc('projects/' + S.id + '/actuals/' + id).set(body); } catch (e) { S.saving = 'Couldn’t save the week' + (e.message ? ': ' + e.message : ''); renderHeader(); }
-  } else { S.localActuals = S.localActuals || {}; S.localActuals[S.id] = S.actuals; }
+    const ref = S.db.doc('projects/' + S.id + '/actuals/' + id);
+    try {
+      const cur = await ref.get();
+      if (cur.exists) { adoptActual(id, cur.data()); S.saving = 'That week was already logged by a colleague; opened it instead'; renderAll(); return; }
+      await ref.set({ ...body, createOnly: true });
+      if (!S.actuals.find(x => x.id === id)) S.actuals.push(row);
+      seen(id, row);
+    } catch (e) {
+      if (e.code === 'exists' && e.current) { adoptActual(id, e.current); S.saving = 'That week was already logged by a colleague; opened it instead'; }
+      else { S.saving = 'Couldn’t save the week' + (e.message ? ': ' + e.message : ''); }
+      renderHeader();
+    }
+  } else { if (!S.actuals.find(x => x.id === row.id)) S.actuals.push(row); S.localActuals = S.localActuals || {}; S.localActuals[S.id] = S.actuals; }
   renderSoon();
 }
-// Save only the fields that changed, so two people logging different modules don't overwrite each other.
-async function patchActual(id, patch) {
+function adoptActual(id, data) {
+  const i = S.actuals.findIndex(x => x.id === id), row = { id, ...data };
+  if (i >= 0) S.actuals[i] = row; else S.actuals.push(row);
+  seen(id, row);
+}
+// What we last saw from the server for each week, to spot a colleague's change to the same field.
+function seen(id, row) { S.actSeen = S.actSeen || {}; S.actSeen[id] = JSON.parse(JSON.stringify(row)); }
+function leaves(o, pre = []) { return Object.entries(o).flatMap(([k, v]) => v && typeof v === 'object' && !Array.isArray(v) ? leaves(v, pre.concat(k)) : [[pre.concat(k), v]]); }
+const at = (o, path) => path.reduce((x, k) => x == null ? undefined : x[k], o);
+const FIELD_LABEL = { notes: 'Highlights', blockers: 'Blockers and risks', hours: 'Hours', designed: 'designed', automated: 'automated', executed: 'manual executions' };
+function fieldLabel(path) {
+  if (path[0] === 'mods') { const m = S.P.modules.find(x => x.id === path[1]); return `${m ? m.name : 'Not split by module'}: ${FIELD_LABEL[path[2]] || path[2]}`; }
+  if (path[0] === 'hoursBy') { const r = S.P.team.find(x => x.id === path[1]); return `Hours for ${r ? r.name : 'a team member'}`; }
+  if (path[0] === 'ot') return `${OT_LABEL[path[1]] || path[1]} % done`;
+  return FIELD_LABEL[path[0]] || path.join('.');
+}
+// Save only the fields that changed, so people logging different things don't overwrite each other.
+// If a colleague changed the same field since we last saw it, ask before overwriting.
+async function patchActual(id, patch, force) {
   const r = S.actuals.find(x => x.id === id); if (!r) return;
+  if (S.db && !S.local && !force) {
+    try {
+      const cur = await S.db.doc('projects/' + S.id + '/actuals/' + id).get();
+      if (cur.exists) {
+        const server = cur.data(), was = (S.actSeen || {})[id] || {};
+        for (const [path, mine] of leaves(patch)) {
+          const theirs = at(server, path), before = at(was, path);
+          if (!same(theirs, before) && !same(theirs, mine)) {
+            S.fieldConflict = { id, path, patch, mine, theirs, by: server.updatedBy, label: fieldLabel(path) };
+            renderAll(); return;
+          }
+        }
+      }
+    } catch (e) { /* fall through and try the save */ }
+  }
   deepMerge(r, JSON.parse(JSON.stringify(patch)));
   if (S.db && !S.local) {
-    try { await S.db.doc('projects/' + S.id + '/actuals/' + id).update(patch); }
+    try { await S.db.doc('projects/' + S.id + '/actuals/' + id).update(patch); S.actSeen = S.actSeen || {}; S.actSeen[id] = deepMerge(S.actSeen[id] || {}, JSON.parse(JSON.stringify(patch))); }
     catch (e) { S.saving = 'Couldn’t save actuals' + (e.message ? ': ' + e.message : ''); renderHeader(); }
   } else { S.localActuals = S.localActuals || {}; S.localActuals[S.id] = S.actuals; }
   renderSoon();
 }
+function fieldConflictBanner() {
+  const c = S.fieldConflict; if (!c) return '';
+  const show = v => v == null || v === '' ? 'empty' : String(v).length > 120 ? String(v).slice(0, 120) + '…' : String(v);
+  const text = typeof c.mine === 'string';
+  return `<div class="banner conflict" role="alert"><b>${esc(c.by || 'A colleague')} changed ${esc(c.label)} while you were editing.</b>
+    <div class="small" style="margin-top:4px">Theirs: <b>${esc(show(c.theirs))}</b><br>Yours: <b>${esc(show(c.mine))}</b></div>
+    <div class="row" style="margin-top:8px"><button class="btn" data-act="fc-theirs">Keep theirs</button><button class="btn" data-act="fc-mine">Use mine</button>${text ? '<button class="btn" data-act="fc-both">Keep both</button>' : ''}</div></div>`;
+}
+function setLeaf(o, path, v) { let x = o; path.slice(0, -1).forEach(k => { x = x[k] = x[k] && typeof x[k] === 'object' ? x[k] : {}; }); x[path[path.length - 1]] = v; return o; }
 async function deleteActual(id) {
   S.actuals = S.actuals.filter(x => x.id !== id);
   if (S.db && !S.local) { try { await S.db.doc('projects/' + S.id + '/actuals/' + id).delete(); } catch (e) { } }
@@ -1214,7 +1397,37 @@ document.addEventListener('change', ev => {
 /* ---------- render scheduling ---------- */
 let rq = false;
 function renderSoon() { if (rq) return; rq = true; requestAnimationFrame(() => { rq = false; renderAll(); }); }
-function analysis() { if (!S.A && S.P) S.A = E.analyse(S.P); return S.A; }
+/* ---------- calculation: in a background worker, so typing never freezes the page ----------
+ * After an edit the page keeps showing the previous results (marked "updating") until the worker
+ * returns. Anything that sends numbers out (copy, export, baseline) uses fresh() instead. */
+let worker = null, calcTimer = null, calcBusy = false, calcAgain = false;
+function startWorker() {
+  try {
+    const src = document.getElementById('engine-src').textContent + '\nonmessage = e => { try { postMessage({ seq: e.data.seq, A: ENGINE.analyse(e.data.P) }); } catch (err) { postMessage({ seq: e.data.seq, error: String(err) }); } };';
+    worker = new Worker(URL.createObjectURL(new Blob([src], { type: 'text/javascript' })));
+    worker.onmessage = ev => {
+      calcBusy = false;
+      const { seq, A, error } = ev.data;
+      if (calcAgain) { calcAgain = false; runCalc(); return; }
+      if (error) { worker = null; S.A = null; S.Aprev = null; S.calculating = false; renderAll(); return; }
+      if (seq === S.editSeq && S.P) { S.A = A; S.Aprev = null; S.calculating = false; renderAll(); }
+    };
+    worker.onerror = () => { worker = null; calcBusy = false; S.Aprev = null; S.calculating = false; renderSoon(); };
+  } catch (e) { worker = null; }
+}
+function runCalc() {
+  if (!worker || !S.P) return;
+  if (calcBusy) { calcAgain = true; return; }
+  calcBusy = true;
+  worker.postMessage({ seq: S.editSeq, P: JSON.parse(JSON.stringify(S.P)) });
+}
+function analysis() {
+  if (S.A) return S.A;
+  if (!S.P) return null;
+  if (S.Aprev && worker) { if (!S.calculating) { S.calculating = true; clearTimeout(calcTimer); calcTimer = setTimeout(runCalc, 200); } return S.Aprev; }
+  S.A = E.analyse(S.P); return S.A;
+}
+function fresh() { if (!S.A || S.calculating) { S.A = E.analyse(S.P); S.Aprev = null; S.calculating = false; S.editSeq = (S.editSeq || 0) + 1; } return S.A; }
 
 function renderAll() {
   const act = document.activeElement; const aid = act && act.id; let selS = null, selE = null;
@@ -1225,7 +1438,7 @@ function renderAll() {
 function renderHeader() {
   const opts = S.list.map(x => `<option value="${x.id}" ${x.id === S.id ? 'selected' : ''}>${esc(x.id === S.id && S.P ? S.P.name : x.name)}</option>`).join('');
   $('#hdr-proj').innerHTML = S.list.length ? `<select id="proj-pick" class="sel-proj" aria-label="Project">${opts}</select>` : '';
-  $('#save').textContent = S.saving;
+  $('#save').textContent = S.saving + (S.calculating ? (S.saving ? ' · ' : '') + 'Updating results…' : '');
   const has = !!S.P;
   $('#hdr-actions').innerHTML = `
     <button class="btn" data-act="new">New project</button>
@@ -1282,7 +1495,7 @@ function missingMsg(m) {
 }
 /* ---------- Summary model: one source for the Summary tab and the copied text ---------- */
 const FTE = n => nf1.format(Math.round(n * 10) / 10);
-const nf2 = new Intl.NumberFormat('en-IN', { maximumFractionDigits: 2 });
+const nf2 = new Intl.NumberFormat('en-US', { maximumFractionDigits: 2 });
 const r10 = h => nf0.format(Math.round((h || 0) / 10) * 10);
 const plural = (n, one, many) => `${nf0.format(n)} ${n === 1 ? one : many}`;
 const calDays = (s, d) => E.daysBetween(s, d) + 1;
@@ -1351,13 +1564,14 @@ function summaryModel(A) {
   // recommendation
   const span = P.end ? Math.max(1, E.daysBetween(P.start, P.end)) : 1;
   const buf = d => d && P.end ? Math.max(0, E.daysBetween(d, P.end)) / span : 0;
+  const bufTxt = b => b < 0.02 ? 'little or no buffer' : `about ${pct(b)} buffer`;
   const fallback = [M.scopeK != null && M.scopeK < tc ? `a reduced scope (about ${M.scopeK} test cases)` : '', fl && P.end && fl > P.end ? `about ${calDays(P.start, fl)} calendar days` : ''].filter(Boolean);
   const orElse = fallback.length ? ` Otherwise, agree with the customer on ${fallback.length > 1 ? 'either ' + fallback.join(' or ') : fallback[0]}.` : '';
   if (A.missing && A.missing.length) M.rec = missingMsg(A.missing);
   else if (!P.end) M.rec = fl ? `With ${teamTxt}, plan for about ${calDays(P.start, fl)} calendar days (finish ${fd(fl)}). Set a target end date to get a staffing recommendation.` : '';
-  else if (A.status === 'ok') M.rec = `The current ${teamTxt} delivers by ${fd(P.end)} with about ${pct(buf(fl))} buffer, and even the worst case is on time.`;
-  else if (A.status === 'risk') M.rec = `The current ${teamTxt} delivers by ${fd(P.end)} with about ${pct(buf(fl))} buffer, but not in the worst case.${A.needWorst && A.needWorst.extra ? ` To cover the worst case, add ${plural(A.needWorst.extra, 'engineer', 'engineers')}` : ' To cover the worst case'}${A.finish.worst.date ? `, or agree a fallback date of ${fd(A.finish.worst.date)}` : ''}.`;
-  else if (A.need && A.need.extra > 0) M.rec = `Staff ${FTE(fte + A.need.extra)} FTE from day 1 to deliver by ${fd(P.end)}, which leaves about ${pct(buf(A.need.finish))} buffer.${orElse}`;
+  else if (A.status === 'ok') M.rec = `The current ${teamTxt} delivers by ${fd(P.end)} with ${bufTxt(buf(fl))}, and even the worst case is on time.`;
+  else if (A.status === 'risk') M.rec = `The current ${teamTxt} delivers by ${fd(P.end)} with ${bufTxt(buf(fl))}, but not in the worst case.${A.needWorst && A.needWorst.extra ? ` To cover the worst case, add ${plural(A.needWorst.extra, 'engineer', 'engineers')}` : ' To cover the worst case'}${A.finish.worst.date ? `, or agree a fallback date of ${fd(A.finish.worst.date)}` : ''}.`;
+  else if (A.need && A.need.extra > 0) M.rec = `Staff ${FTE(fte + A.need.extra)} FTE from day 1 to deliver by ${fd(P.end)}, which leaves ${bufTxt(buf(A.need.finish))}.${orElse}`;
   else if (A.need && A.need.extra == null) M.rec = `Adding people won’t bring this in by ${fd(P.end)}.${orElse || ' Move the target date or cut scope.'}`;
   else M.rec = '';
 
@@ -1471,7 +1685,7 @@ function summaryMarkdown(A, aud) {
 }
 
 async function copySummary() {
-  const text = summaryMarkdown(analysis(), S.sumAud || 'client');
+  const text = summaryMarkdown(fresh(), S.sumAud || 'client');
   try {
     if (!navigator.clipboard || !navigator.clipboard.writeText) throw new Error('no clipboard');
     await navigator.clipboard.writeText(text);
@@ -1669,7 +1883,7 @@ function viewCalendar() {
         <div class="field"><span class="lbl">Paste from your company list</span>
           <textarea id="hol-paste" rows="6" placeholder="One per line: date, name, location&#10;2027-03-22, Holi, India&#10;29/10/2027, Diwali, India"></textarea>
           <span class="hint">Dates as YYYY-MM-DD or DD/MM/YYYY. Location is optional and defaults to the one selected.</span>
-          <div class="row"><label class="row small">Default location ${`<select id="hol-loc">${P.locations.map(l => `<option>${esc(l)}</option>`).join('')}</select>`}</label><button class="btn" data-act="hol-import">Add pasted holidays</button></div>
+          <div class="row"><label class="row small">Dates like 07/04/2027 are <select id="hol-order"><option value="dmy">day first (7 Apr)</option><option value="mdy">month first (4 Jul)</option></select></label><label class="row small">Default location ${`<select id="hol-loc">${P.locations.map(l => `<option>${esc(l)}</option>`).join('')}</select>`}</label><button class="btn" data-act="hol-import">Add pasted holidays</button></div>
           ${S.holNote ? `<span class="small">${esc(S.holNote)}</span>` : ''}
         </div>
         <div class="field"><span class="lbl">Add calculated holidays</span>
@@ -1766,6 +1980,7 @@ function viewFactors() {
       ${a.levels.map(l => f(`a.teamMix.${l.key}`, `Mix: ${l.key} %`)).join('')}
       <label class="field"><span class="lbl">New hires’ tool skill</span>${sel('a.hireSkill', a.skills.map(x => x.key))}</label>
       <label class="field"><span class="lbl">New hires’ location</span>${sel('a.hireLocation', P.locations)}</label>
+      ${f('a.hireLeadDays', 'New hires join after (working days)', 'Time to hire or move people onto the project')}
       ${f('a.leadSpan', 'Engineers per lead')}
       ${f('a.managerAbove', 'Add a manager above team size')}
       ${f('a.managerAlloc', 'Manager allocation %')}
@@ -1779,6 +1994,7 @@ const ST_LABEL = { ok: 'On track', risk: 'At risk', no: 'Behind', ahead: 'Ahead'
 const ST_PILL = { ok: 'ok', risk: 'risk', no: 'no', ahead: 'ok', notstarted: 'na' };
 const KINDS = [['designed', 'Test cases designed', 'design', 'designN'], ['automated', 'Test cases automated', 'script', 'autoN'], ['executed', 'Manual executions', 'exec', 'runs']];
 const OT_LABEL = { setup: 'Onboarding and setup', framework: 'Framework development', common: 'Common methods', cicd: 'CI/CD and reporting', close: 'Closure and handover' };
+const OT_LC = { setup: 'onboarding and setup', framework: 'framework development', common: 'common methods', cicd: 'CI/CD and reporting', close: 'closure and handover' };
 const n0 = v => nf0.format(Math.round(v || 0));
 
 function baselinePanel(A) {
@@ -1800,6 +2016,8 @@ function baselinePanel(A) {
   return `<section class="panel"><div class="panel-head"><h2>Baseline</h2>${pill('ok', 'Frozen ' + fd(b.at))}</div>
     <p>Progress is measured against the baseline frozen on <b>${fd(b.at)}</b>${b.reason ? ` (${esc(b.reason)})` : ''}: finish ${fd(b.finish)}, ${H(b.total)} h, ${n0(b.tcs)} test cases (${n0(b.autoTCs)} automated).</p>
     ${chips.length ? `<div class="chips"><span class="small muted">Since then:</span>${chips.join('')}</div>` : '<p class="small muted">The current plan matches the baseline.</p>'}
+    ${v.endChanged ? `<p class="small muted">Status and emails still measure lateness against the baselined target (${fd(b.end)}). Re-baseline to adopt the new date.</p>` : ''}
+    ${P.modules.some(m => !b.W.mods.some(x => x.id === m.id)) ? `<p class="small muted">Modules added since the baseline (${P.modules.filter(m => !b.W.mods.some(x => x.id === m.id)).map(m => esc(m.name)).join(', ')}) are tracked separately and don’t count as progress until you re-baseline.</p>` : ''}
     ${S.rebaseline ? freezeForm('Freeze new baseline', true) : `<div><button class="btn" data-act="baseline-start">Re-baseline…</button></div>`}
     ${hist.length > 1 ? `<details class="howto"><summary>Baseline history (${hist.length})</summary><div class="tbl-wrap" style="margin-top:8px"><table><thead><tr><th>Frozen</th><th>Reason</th><th class="r">Finish</th><th class="r">Effort h</th><th class="r">Test cases</th></tr></thead><tbody>
       ${hist.slice().reverse().map(h => `<tr><td>${fd(h.at)}</td><td>${esc(h.reason || '—')}</td><td class="r num">${fd(h.finish)}</td><td class="r num">${H(h.total)}</td><td class="r num">${n0(h.tcs)}</td></tr>`).join('')}</tbody></table></div></details>` : ''}
@@ -1818,12 +2036,12 @@ function viewTracking() {
     <div class="kpi"><span class="lbl">Completed</span><span class="v">${L ? pct(L.pct) : '—'}</span><span class="small muted">weighted by effort, incl. setup and framework</span></div>
     <div class="kpi"><span class="lbl">Planned by now</span><span class="v">${L && L.plannedPct != null ? pct(L.plannedPct) : '—'}</span><span class="small muted">${L ? `${planLbl}, end of week of ${fd(L.week)}` : 'log a week to compare'}</span></div>
     <div class="kpi"><span class="lbl">Schedule index</span><span class="v">${T.spi == null ? '—' : T.spi.toFixed(2)}</span>${spiState ? pill(spiState, ST_LABEL[spiState]) : '<span class="small muted">once planned work starts</span>'}</div>
-    <div class="kpi"><span class="lbl">Earned h per logged h</span><span class="v">${T.eff == null ? '—' : T.eff.toFixed(2)}</span><span class="small muted">above 1 means faster than estimated</span></div>
+    <div class="kpi"><span class="lbl">Earned h per logged h</span><span class="v">${T.eff == null ? '—' : T.eff.toFixed(2)}</span><span class="small muted">${T.effPlan ? `plan implies ${T.effPlan.toFixed(2)}` : 'log hours to compare with the plan'}</span>${T.effIndex != null ? (T.effIndex >= 0.95 ? pill('ok', 'As planned') : T.effIndex >= 0.85 ? pill('risk', 'Slightly low') : pill('no', 'Low')) : ''}</div>
     <div class="kpi"><span class="lbl">Forecast at current pace</span><span class="v" style="font-size:17px">${T.forecastRaw ? fd(T.forecastRaw) : '—'}</span><span class="small muted">${planLbl} finish ${T.end ? fd(T.end) : '—'}${T.forecast && T.forecastRaw && Math.abs(E.daysBetween(T.forecast, T.forecastRaw)) > 7 ? ` · smoothed for early weeks ${fd(T.forecast)}` : ''}</span></div>
   </div>`;
   const rows = T.rows.map(r => {
     const sp = r.plannedPct > 0 ? r.pct / r.plannedPct : null, st = sp == null ? null : sp >= 0.97 ? 'ok' : sp >= 0.85 ? 'risk' : 'no';
-    return `<tr class="${r.week === S.trWeek ? 'sel' : ''}"><td>${fd(r.week)}</td><td class="r num">${n0(r.designed)}</td><td class="r num">${n0(r.automated)}</td><td class="r num">${n0(r.executed)}</td><td class="r num">${n0(r.hours)}</td>
+    return `<tr class="${r.week === S.trWeek ? 'sel' : ''}"><td>${fd(r.week)}</td><td class="r num">${n0(r.designed)}</td><td class="r num">${n0(r.automated)}</td><td class="r num">${n0(r.executed)}</td><td class="r num">${n0(E.hoursOf(r))}</td>
       <td class="r num">${pct(r.pct)}</td><td class="r num">${r.plannedPct == null ? '—' : pct(r.plannedPct)}</td><td>${st ? pill(st, ST_LABEL[st]) : ''}</td>
       <td class="r"><button class="btn" data-act="tr-edit" data-id="${r.id}">${r.week === S.trWeek ? 'Editing' : 'Edit'}</button> <button class="btn ghost" data-act="rm-ac" data-id="${r.id}">Remove</button></td></tr>`;
   }).join('');
@@ -1860,16 +2078,18 @@ function weekEditor(R) {
   return `<section class="panel">
     <div class="panel-head"><h2>Week of ${fd(R.week)} <span class="muted small">week ${R.weekNo}</span></h2>
       <label class="row small">Week ${selWeek('tr-week-a')}</label></div>
+    ${fieldConflictBanner()}
     ${R.warnings.length ? `<div class="banner" role="status">${R.warnings.map(esc).join('<br>')}</div>` : ''}
     <div class="tbl-wrap"><table><thead><tr><th>Module</th>${KINDS.map(k => `<th>${k[1]}</th>`).join('')}</tr></thead><tbody>
       ${R.mods.map(m => `<tr><td>${esc(m.name)}</td>${KINDS.map(k => cell(m, k)).join('')}</tr>`).join('')}
+      ${R.outside.map(o => `<tr class="sub"><td>${esc(o.name)} <span class="small muted">(not in baseline)</span></td>${KINDS.map(([key]) => `<td><input type="number" class="w-s" min="0" step="1" id="ac-${r.id}-${o.id}-${key}" data-ac="${r.id}" data-mod="${o.id}" data-k="${key}" value="${(mods[o.id] || {})[key] || 0}"></td>`).join('')}</tr>`).join('')}
       ${legacy ? `<tr class="sub"><td>Not split by module <span class="small muted">(logged before modules)</span></td>${KINDS.map(([key]) => `<td><input type="number" class="w-s" min="0" step="1" id="ac-${r.id}-_all-${key}" data-ac="${r.id}" data-mod="_all" data-k="${key}" value="${legacy[key] || 0}"></td>`).join('')}</tr>` : ''}
       <tr class="total"><td>This week</td>${KINDS.map(([key, , pk]) => `<td class="num">${n0(R.totals.week[key])} <span class="plan-hint">plan ${n0(R.thisPlan.total[pk])}</span></td>`).join('')}</tr>
     </tbody></table></div>
     ${otRows ? `<div><h3>Setup and framework progress</h3><p class="small muted">Percent complete to date. Leave blank to carry over last week’s figure.</p><div class="fields" style="margin-top:8px">${otRows}</div></div>` : ''}
-    <div class="fields">
-      <label class="field"><span class="lbl">Hours logged by the team</span><input type="number" min="0" step="any" id="ac-${r.id}-hours" data-ac="${r.id}" data-k="hours" value="${+r.hours || 0}"><span class="hint">Used for productivity (earned h per logged h)</span></label>
-    </div>
+    <div><h3>Hours logged</h3><p class="small muted">Each person’s timesheet hours for the week. Used for productivity (earned hours per logged hour). Total: <b class="num">${n0(E.hoursOf(r))} h</b>.</p>
+      <div class="fields" style="margin-top:8px">${S.P.team.map(p => `<label class="field"><span class="lbl">${esc(p.name)}</span><input type="number" min="0" max="200" step="any" id="ac-${r.id}-h-${p.id}" data-ac="${r.id}" data-hp="${p.id}" value="${r.hoursBy && r.hoursBy[p.id] != null ? r.hoursBy[p.id] : ''}" placeholder="0"></label>`).join('')}
+      ${!(r.hoursBy && Object.keys(r.hoursBy).length) && +r.hours > 0 ? `<label class="field"><span class="lbl">Earlier total (not split)</span><input type="number" min="0" step="any" id="ac-${r.id}-hours" data-ac="${r.id}" data-k="hours" value="${+r.hours || 0}"><span class="hint">Replaced once you enter hours per person</span></label>` : ''}</div></div>
     <div class="grid2">
       <label class="field"><span class="lbl">Highlights this week</span><textarea rows="4" id="ac-${r.id}-notes" data-ac="${r.id}" data-k="notes" placeholder="One per line, e.g. Login and payments flows automated">${esc(r.notes || '')}</textarea></label>
       <label class="field"><span class="lbl">Blockers and risks</span><textarea rows="4" id="ac-${r.id}-blockers" data-ac="${r.id}" data-k="blockers" placeholder="One per line, e.g. Test environment down Tuesday to Thursday">${esc(r.blockers || '')}</textarea></label>
@@ -1886,6 +2106,7 @@ function moduleProgress(R) {
   return `<section class="panel"><div class="panel-head"><h2>Progress by module</h2><span class="small muted">to the end of week of ${fd(R.week)} · done / planned / total</span></div>
     <div class="tbl-wrap"><table><thead><tr><th>Module</th>${KINDS.map(k => `<th class="r">${k[1]}</th>`).join('')}<th class="r">Done</th><th>Status</th></tr></thead><tbody>
     ${R.mods.map(m => `<tr><td>${esc(m.name)}</td>${KINDS.map(([key, , pk, sk]) => c(m, key, pk, sk)).join('')}<td class="r num">${pct(m.pctDone)}</td><td>${pill(ST_PILL[m.status], ST_LABEL[m.status])}</td></tr>`).join('')}
+    ${R.outside.map(o => `<tr class="sub"><td>${esc(o.name)}</td>${KINDS.map(([key]) => `<td class="r num">${n0(o.act[key])}</td>`).join('')}<td></td><td>${pill('na', 'Not in baseline')}</td></tr>`).join('')}
     ${R.ot.map(o => `<tr class="sub"><td>${OT_LABEL[o.key]}</td><td colspan="3" class="muted small">${o.done == null ? 'not logged yet' : Math.round(o.done) + '% done'} · ${Math.round(o.planned)}% planned by now</td><td class="r num">${o.done == null ? '—' : Math.round(o.done) + '%'}</td><td>${o.done == null ? '' : o.done + 3 >= o.planned ? pill('ok', 'On track') : o.done + 15 >= o.planned ? pill('risk', 'At risk') : pill('no', 'Behind')}</td></tr>`).join('')}
     </tbody></table></div></section>`;
 }
@@ -1903,14 +2124,17 @@ function mailModel(R, aud) {
   const title = M.title || P.name || 'the project';
   const label = ST_LABEL[R.status];
   const subject = `${title}: weekly status, week of ${fd(R.week)} (${label})`;
-  const pl = R.row.plannedPct, target = P.end;
+  const pl = R.row.plannedPct, target = R.target;
   let reason = `${pct(R.row.pct)} complete against ${pl == null ? '—' : pct(pl)} planned`;
-  if (R.forecast) {
+  if (R.early && R.forecast) {
+    reason = `Early days: ${pct(R.row.pct)} complete against ${pl == null ? '—' : pct(pl)} planned${R.spi != null ? ` (${pct(R.spi)} of the planned pace)` : ''}. If this pace held, the work would finish ${fd(R.forecast)}${target ? (R.late > 0 ? `, after the ${fd(target)} target` : `, within the ${fd(target)} target`) : ''}; the picture will firm up over the next few weeks`;
+  } else if (R.forecast) {
     reason += `; at the current pace the work finishes ${fd(R.forecast)}` + (target ? (R.late > 0 ? `, ${plural(R.late, 'day', 'days')} after the ${fd(target)} target` : `, within the ${fd(target)} target`) : '');
     if (R.forecastSmoothed && Math.abs(E.daysBetween(R.forecastSmoothed, R.forecast)) > 7) reason += ` (allowing for early-week variation, about ${fd(R.forecastSmoothed)})`;
   }
   reason += '.';
   let base = '';
+  if (R.targetChanged) base += `The target date has moved from ${fd(R.targetChanged.from)} to ${R.targetChanged.to ? fd(R.targetChanged.to) : 'none'} since the baseline; we still report against ${fd(R.targetChanged.from)} until the baseline is updated. `;
   if (R.baseline) {
     base = `Measured against the baseline agreed on ${fd(R.baseline.at)}.`;
     const h = R.history; if (h.length > 1) base += ` Re-baselined on ${fd(h[h.length - 1].at)}${h[h.length - 1].reason ? ': ' + h[h.length - 1].reason : ''}.`;
@@ -1924,14 +2148,15 @@ function mailModel(R, aud) {
   });
   R.ot.forEach(o => { if (o.done != null && o.done + 15 < o.planned) risks.push(`<b>${OT_LABEL[o.key]}</b> is behind: ${Math.round(o.done)}% done against ${Math.round(o.planned)}% planned.`); });
   if (R.late > 0) risks.push(`At the current pace the finish moves to ${fd(R.forecast)}, ${plural(R.late, 'day', 'days')} after the target.`);
-  if (internal && R.eff != null && R.eff < 0.85) risks.push(`Productivity is ${R.eff.toFixed(2)} earned hours per logged hour, below the estimate.`);
+  if (internal && R.effIndex != null && R.effIndex < 0.85) risks.push(`Productivity is ${R.eff.toFixed(2)} earned hours per logged hour, against about ${R.effPlan.toFixed(2)} in the plan.`);
+  if (R.outside.some(o => o.act.designed + o.act.automated + o.act.executed > 0)) risks.push(`Work is being done on modules outside the agreed baseline (listed below). It isn’t counted as progress until a change request is agreed.`);
   if (internal) R.warnings.forEach(w => risks.push(esc(w)));
   lines(R.row.blockers).forEach(x => risks.push(esc(x)));
   const nx = [];
   const np = R.nextPlan.total;
   const parts = [['design', 'design'], ['script', 'automate'], ['exec', 'run']].filter(([k]) => np[k] >= 0.5).map(([k, v]) => `${v} about ${n0(np[k])}`);
   if (parts.length) nx.push(`Planned: ${parts.join(', ')} test cases.`);
-  const otNext = R.ot.filter(o => o.nextPlanned > o.planned + 0.5 && o.planned < 100).map(o => `${OT_LABEL[o.key].toLowerCase()} to about ${Math.round(o.nextPlanned)}%`);
+  const otNext = R.ot.filter(o => o.nextPlanned > o.planned + 0.5 && o.planned < 100).map(o => `${OT_LC[o.key]} to about ${Math.round(o.nextPlanned)}%`);
   if (otNext.length) nx.push(`Setup and framework: ${otNext.join(', ')}.`);
   const top = R.mods.filter(m => m.next.design + m.next.script + m.next.exec >= 0.5).map(m => esc(m.name));
   if (top.length) nx.push(`Focus: ${top.join(', ')}.`);
@@ -1946,7 +2171,8 @@ function mailModel(R, aud) {
     if (n) leave.push([r.name, n]);
   });
   if (leave.length) nx.push(internal ? `On leave: ${leave.map(([n, d]) => `${esc(n)} (${plural(d, 'day', 'days')})`).join(', ')}.` : `Planned leave: ${plural(leave.reduce((t, x) => t + x[1], 0), 'person-day', 'person-days')}.`);
-  return { title, subject, label, reason, base, inScope, scopeTot, risks, next: nx, highlights: lines(R.row.notes).map(esc), confirm: M.confirm.map(esc), internal, fte: M.fte };
+  const outside = R.outside.filter(o => o.act.designed + o.act.automated + o.act.executed > 0).map(o => `<b>${esc(o.name)}</b>: ${[['designed', 'designed'], ['automated', 'automated'], ['executed', 'manual executions']].filter(([k]) => o.act[k] > 0).map(([k, l]) => `${n0(o.act[k])} ${l}`).join(', ')} so far.`);
+  return { title, subject, label, reason, base, outside, inScope, scopeTot, risks, next: nx, highlights: lines(R.row.notes).map(esc), confirm: M.confirm.map(esc), internal, fte: M.fte };
 }
 
 function mailHTML(R, aud) {
@@ -1965,6 +2191,7 @@ function mailHTML(R, aud) {
     b.push(mt(['Module', ...X.inScope.map(k => k[1].replace('Test cases ', '').replace(/^./, c => c.toUpperCase())), 'Done', 'Status'],
       R.mods.map(m => [esc(m.name), ...X.inScope.map(([key, , , sk]) => m[sk] > 0 ? `${n0(Math.min(m.act[key], m[sk]))} of ${n0(m[sk])}` : '—'), pct(m.pctDone), m.status === 'notstarted' ? 'Not started' : `<span style="color:${MAIL_COL[ST_PILL[m.status] === 'ok' ? 'ok' : m.status] || '#444'}">■</span> ${ST_LABEL[m.status]}`]), [X.inScope.length + 1]));
   }
+  if (X.outside.length) { b.push(mh('Work outside the agreed baseline (pending a change request)')); b.push(mul(X.outside)); }
   if (X.highlights.length) { b.push(mh('Highlights')); b.push(mul(X.highlights)); }
   b.push(mh('Risks and blockers'));
   b.push(X.risks.length ? mul(X.risks) : '<p style="margin:2px 0 10px 0">No new risks or blockers this week.</p>');
@@ -1973,7 +2200,7 @@ function mailHTML(R, aud) {
   if (X.internal) {
     b.push(mh('Effort'));
     b.push(mul([`Hours logged this week: ${n0(R.hoursWeek)} (to date ${n0(R.hoursToDate)}).`,
-      `Earned hours per logged hour: ${R.eff == null ? '—' : R.eff.toFixed(2)}.`,
+      `Earned hours per logged hour: ${R.eff == null ? '—' : R.eff.toFixed(2)}${R.effPlan ? ` (the plan implies about ${R.effPlan.toFixed(2)})` : ''}.`,
       `Schedule index: ${R.spi == null ? '—' : R.spi.toFixed(2)}. ${R.baseline ? 'Baseline' : 'Planned'} finish ${R.plannedFinish ? fd(R.plannedFinish) : '—'}.`,
       `Team: ${FTE(X.fte)} FTE.`]));
   }
@@ -2024,7 +2251,9 @@ document.addEventListener('input', ev => {
 function flashMail(t) { S.mailNote = t; renderAll(); clearTimeout(S.mailTimer); S.mailTimer = setTimeout(() => { S.mailNote = ''; if (S.tab === 'tracking') renderAll(); }, 3500); }
 function selectNode(el) { const r = document.createRange(); r.selectNodeContents(el); const s = window.getSelection(); s.removeAllRanges(); s.addRange(r); }
 async function copyMail(plain) {
+  if (S.calculating) { fresh(); renderAll(); }
   const el = $('#mail-preview'); if (!el) return;
+  if (el.closest('#mail-panel').querySelector('[data-act=mail-copy][disabled]')) return;
   const html = el.innerHTML, text = el.innerText;
   try {
     if (plain) { await navigator.clipboard.writeText(text); }
@@ -2053,6 +2282,10 @@ document.addEventListener('change', ev => {
   const r = S.actuals.find(x => x.id === el.dataset.ac); if (!r) return;
   const k = el.dataset.k;
   if (k === 'notes' || k === 'blockers') return patchActual(r.id, { [k]: el.value });
+  if (el.dataset.hp) {
+    const v = el.value === '' ? 0 : Math.min(200, Math.max(0, Number(el.value) || 0));
+    return patchActual(r.id, { hoursBy: { [el.dataset.hp]: v } });
+  }
   if (el.dataset.ot) {
     const v = el.value === '' ? null : Math.min(100, Math.max(0, Math.round(Number(el.value) || 0)));
     return patchActual(r.id, { ot: { [el.dataset.ot]: v } });
@@ -2194,7 +2427,7 @@ function viewSchedule() {
   </section>
   <section class="panel">
     <h2>Weekly plan</h2>
-    <p class="small muted">Planned output per week. The “Planned done” column is the baseline the Tracking tab compares actuals against.</p>
+    <p class="small muted">Planned output per week from the current plan.${S.P.baseline ? ' Tracking compares actuals with the frozen baseline, which may differ (see the Tracking tab).' : ' Until a baseline is frozen, Tracking compares actuals with this plan.'}</p>
     ${weeklyTable(A)}
   </section>`;
 }
@@ -2365,7 +2598,7 @@ function weeklyRows(A) {
 }
 function weeklyTable(A) {
   const rows = weeklyRows(A);
-  return `<div class="tbl-wrap" style="max-height:520px;overflow:auto"><table><thead><tr><th>Week of</th><th class="r">Working days</th><th>Main work</th><th class="r">Test cases designed</th><th class="r">Test cases automated</th><th class="r">Manual executions</th><th class="r">Team productive h</th><th class="r">Waiting h</th><th class="r">Planned done</th></tr></thead><tbody>
+  return `<div class="tbl-wrap" style="max-height:520px;overflow:auto"><table><thead><tr><th>Week of</th><th class="r">Working days</th><th>Main work</th><th class="r">Test cases designed</th><th class="r">Test cases automated</th><th class="r">Manual executions</th><th class="r">Team productive h</th><th class="r">Waiting h</th><th class="r">Planned done (current plan)</th></tr></thead><tbody>
     ${rows.map(r => `<tr><td>${fd(r.week)}</td><td class="r num">${r.days}</td><td class="small main-work">${r.main.join(', ') || '<span class="muted">Holidays</span>'}</td><td class="r num">${r.design >= 0.5 ? nf0.format(r.design) : ''}</td><td class="r num">${r.script >= 0.5 ? nf0.format(r.script) : ''}</td><td class="r num">${r.exec >= 0.5 ? nf0.format(r.exec) : ''}</td><td class="r num">${H(r.cap)}</td><td class="r num">${r.idle >= 0.5 ? H(r.idle) : ''}</td><td class="r num">${pct(r.done)}</td></tr>`).join('')}
   </tbody></table></div>`;
 }
@@ -2405,7 +2638,17 @@ document.addEventListener('click', ev => {
     case 'del-no': S.confirmDel = false; renderHeader(); break;
     case 'del-yes': S.confirmDel = false; deleteProject(); break;
     case 'xlsx': exportXlsx(); break;
-    case 'conflict-theirs': { const t = S.conflict.theirs; S.conflict = null; try { S.P = migrate(JSON.parse(JSON.stringify(t.data))); S.rev = t.rev; S.A = null; S.saving = 'Loaded the latest version'; } catch (e) { S.loadError = 'Their version is damaged and couldn’t be opened.'; S.P = null; } renderAll(); break; }
+    case 'conflict-use-theirs': resolveConflict(false); break;
+    case 'fc-theirs': case 'fc-mine': case 'fc-both': {
+      const c = S.fieldConflict; S.fieldConflict = null; if (!c) break;
+      const r = S.actuals.find(x => x.id === c.id);
+      if (act === 'fc-theirs') { if (r) setLeaf(r, c.path, c.theirs); S.actSeen[c.id] = setLeaf(S.actSeen[c.id] || {}, c.path, c.theirs); renderAll(); break; }
+      const v = act === 'fc-both' ? [c.theirs, c.mine].filter(Boolean).join('\n') : c.mine;
+      S.actSeen[c.id] = setLeaf(S.actSeen[c.id] || {}, c.path, c.theirs);
+      patchActual(c.id, setLeaf({}, c.path, v), true); break;
+    }
+    case 'conflict-use-mine': resolveConflict(true); break;
+    case 'conflict-theirs': { const t = S.conflict.theirs; S.conflict = null; try { S.P = migrate(JSON.parse(JSON.stringify(t.data))); S.baseP = JSON.parse(JSON.stringify(S.P)); S.rev = t.rev; S.A = null; S.Aprev = null; S.saving = 'Loaded the latest version'; } catch (e) { S.loadError = 'Their version is damaged and couldn’t be opened.'; S.P = null; } renderAll(); break; }
     case 'conflict-mine': { S.rev = S.conflict.theirs && S.conflict.theirs.rev; S.conflict = null; saveNow(); break; }
     case 'copy-summary': copySummary(); break;
     case 'sum-aud': S.sumAud = b.dataset.k; renderAll(); break;
@@ -2426,7 +2669,10 @@ document.addEventListener('click', ev => {
         const parts = line.split(/\t|,|;/).map(x => x.trim());
         let d = parts[0] || '';
         const m1 = d.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/), m2 = d.match(/^(\d{1,2})[\/.-](\d{1,2})[\/.-](\d{4})$/);
-        if (m1) d = `${m1[1]}-${m1[2].padStart(2, '0')}-${m1[3].padStart(2, '0')}`; else if (m2) d = `${m2[3]}-${m2[2].padStart(2, '0')}-${m2[1].padStart(2, '0')}`; else { bad++; return; }
+        const mdy = ($('#hol-order') || {}).value === 'mdy';
+        if (m1) d = `${m1[1]}-${m1[2].padStart(2, '0')}-${m1[3].padStart(2, '0')}`;
+        else if (m2) { const [dd, mm] = mdy ? [m2[2], m2[1]] : [m2[1], m2[2]]; d = `${m2[3]}-${mm.padStart(2, '0')}-${dd.padStart(2, '0')}`; }
+        else { bad++; return; }
         if (isNaN(E.toD(d)) || E.toS(E.toD(d)) !== d) { bad++; return; }
         const l = parts[2] && P.locations.includes(parts[2]) ? parts[2] : loc;
         if (P.holidays.some(h => h.date === d && h.location === l)) { dup++; return; }
@@ -2455,7 +2701,7 @@ document.addEventListener('click', ev => {
       const weeks = S.actuals.map(x => x.week).sort();
       const wk = weeks.length ? E.addDays(weeks[weeks.length - 1], 7) : E.mondayOf(P.start);
       S.trWeek = wk;
-      createActual({ id: wk, week: wk, hours: 0, notes: '', blockers: '', mods: {}, ot: {} });
+      createActual({ id: wk, week: wk, notes: '', blockers: '', mods: {}, ot: {}, hoursBy: {} });
       break;
     }
     case 'rm-ac': deleteActual(b.dataset.id); break;
@@ -2471,7 +2717,7 @@ document.addEventListener('click', ev => {
     case 'baseline-freeze': {
       const reason = ($('#baseline-reason') || {}).value || '';
       if (P.baseline && !reason.trim()) { S.baselineNote = 'Give a reason for re-baselining. It goes into the status emails.'; renderAll(); break; }
-      const A = analysis();
+      const A = fresh();
       if (!A.sched || !A.sched.finish) break;
       const b = E.makeBaseline(P, A.sched, reason.trim());
       P.baselineHistory = (P.baselineHistory || []).concat([{ at: b.at, reason: b.reason, finish: b.finish, total: b.total, tcs: b.tcs, autoTCs: b.autoTCs }]);
@@ -2489,7 +2735,7 @@ document.addEventListener('change', ev => {
 
 /* ---------- Excel export ---------- */
 async function exportXlsx() {
-  const P = S.P, A = analysis(), e = A.e, a = P.a;
+  const P = S.P, A = fresh(), e = A.e, a = P.a;
   if (typeof XLSX === 'undefined') { S.saving = 'Excel library didn’t load'; renderHeader(); return; }
   if (!S.dl) { S.saving = 'Downloads aren’t available in this view'; renderHeader(); return; }
   const wb = XLSX.utils.book_new();
@@ -2551,6 +2797,7 @@ async function exportXlsx() {
 
 /* ---------- boot ---------- */
 (async function boot() {
+  startWorker();
   try { const t = localStorage.getItem('tee.tab'); if (t) S.tab = t; } catch (e) { }
   S.loading = true; renderAll();
   const claude = window.claude;
@@ -2582,9 +2829,9 @@ async function exportXlsx() {
       const cur = S.list.find(x => x.id === S.id);
       if (!cur) { S.P = null; S.id = null; if (S.list.length) openProject(S.list[0].id); else renderAll(); return; }
       if (cur.rev && cur.rev !== S.rev && cur.rev !== S.pendingRev && !S.conflict) {
-        if (S.saving === 'Unsaved' || S.saving === 'Saving…') { setConflict(cur); return; } // both edited: ask
+        if (S.saving === 'Unsaved' || S.saving === 'Saving…') { clearTimeout(saveTimer); mergeWith(cur); return; } // both edited: merge now
         // someone else saved and we have no unsaved edits: take theirs
-        try { S.P = migrate(JSON.parse(JSON.stringify(cur.data))); S.rev = cur.rev; S.A = null; } catch (e) { S.loadError = 'The latest version of this project is damaged and couldn’t be opened.'; S.P = null; }
+        try { S.P = migrate(JSON.parse(JSON.stringify(cur.data))); S.baseP = JSON.parse(JSON.stringify(S.P)); S.rev = cur.rev; S.A = null; S.Aprev = null; } catch (e) { S.loadError = 'The latest version of this project is damaged and couldn’t be opened.'; S.P = null; }
         renderAll(); return;
       }
     }

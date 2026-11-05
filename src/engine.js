@@ -56,6 +56,7 @@ const ENGINE = (() => {
       teamMix: { Junior: 20, Mid: 50, Senior: 30, Expert: 0 },
       hireSkill: 'Working knowledge',
       hireLocation: 'India',
+      hireLeadDays: 10,
       leadSpan: 8,
       managerAbove: 20,
       managerAlloc: 50,
@@ -337,10 +338,17 @@ const ENGINE = (() => {
     out.slice().sort((a, b) => b.r - a.r).forEach(x => { if (left > 0) { x.n++; left--; } });
     return out.filter(x => x.n > 0);
   }
+  // Extra people join after a hiring / onboarding lead time (working days from the start).
+  function hireStart(p) {
+    let d = p.start, n = Math.max(0, Math.round(+p.a.hireLeadDays || 0));
+    while (n > 0) { d = addDays(d, 1); if (p.a.workDays.includes(dow(d))) n--; }
+    return n === 0 && (+p.a.hireLeadDays || 0) > 0 ? d : '';
+  }
   function hireTeam(p, n, prefix = 'New hire') {
+    const from = hireStart(p);
     const heads = splitHeads(n, hireProfiles(p));
     const t = []; let i = 1;
-    heads.forEach(h => { for (let k = 0; k < h.n; k++) t.push({ id: 'h' + i, name: prefix + ' ' + (i++), role: 'Engineer', activity: 'Both', level: h.level, skill: p.a.hireSkill, alloc: 100, location: p.a.hireLocation, start: '', end: '', leaves: [] }); });
+    heads.forEach(h => { for (let k = 0; k < h.n; k++) t.push({ id: 'h' + i, name: prefix + ' ' + (i++), role: 'Engineer', activity: 'Both', level: h.level, skill: p.a.hireSkill, alloc: 100, location: p.a.hireLocation, start: from, end: '', leaves: [] }); });
     return t;
   }
 
@@ -680,6 +688,11 @@ const ENGINE = (() => {
     });
     return out;
   }
+  // Hours logged in a week: per person when split, else the older single total.
+  function hoursOf(r) {
+    if (r.hoursBy && Object.keys(r.hoursBy).length) return Object.values(r.hoursBy).reduce((t, v) => t + nn(v), 0);
+    return nn(r.hours);
+  }
   function rowMods(r) {
     if (r.mods && Object.keys(r.mods).length) return r.mods;
     if ((+r.designed || 0) + (+r.executed || 0) + (+r.automated || 0) > 0) return { _all: { designed: +r.designed || 0, executed: +r.executed || 0, automated: +r.automated || 0 } };
@@ -703,35 +716,56 @@ const ENGINE = (() => {
         o.designed += nn(v.designed); o.automated += nn(v.automated); o.executed += nn(v.executed);
         t.d += nn(v.designed); t.x += nn(v.executed); t.a += nn(v.automated);
       });
-      cumD += t.d; cumX += t.x; cumA += t.a; cumH += nn(r.hours);
+      cumD += t.d; cumX += t.x; cumA += t.a; cumH += hoursOf(r);
       Object.entries(r.ot || {}).forEach(([k, v]) => { if (v !== '' && v != null) otNow[k] = Math.min(100, nn(v)); });
       // earned to date, never more than the scope of each module
       let earned = 0;
       Object.entries(cum).forEach(([id, o]) => {
         const mw = W.mods.find(m => m.id === id);
         if (mw) earned += Math.min(o.designed, mw.designN) * mw.wD + Math.min(o.executed, mw.runs) * mw.wX + Math.min(o.automated, mw.autoN) * mw.wA;
-        else earned += o.designed * W.wD + o.executed * W.wX + o.automated * W.wA;
+        else if (id === '_all') earned += o.designed * W.wD + o.executed * W.wX + o.automated * W.wA; // logged before modules existed
+        // modules that aren't in the plan being measured against (added after the baseline) earn nothing here;
+        // they are reported separately as work outside the baseline
       });
       OT_PHASES.forEach(k => { if (otNow[k] != null) earned += (W.ot[k] || 0) * otNow[k] / 100; });
       return { ...r, designed: t.d, executed: t.x, automated: t.a, cumD, cumX, cumA, cumH, earned, otToDate: { ...otNow }, cumMods: JSON.parse(JSON.stringify(cum)), pct: Math.min(1, earned / W.V) };
     });
     rows.forEach(r => { r.plannedPct = src.weekStart ? planAt(addDays(r.week, 6)) : null; });
     const keys = Object.keys(curve).map(Number).sort((x, y) => x - y);
-    const plan = src.weekStart ? [[src.start || p.start, 0], ...keys.map(w => [addDays(src.weekStart, w * 7 + 6), curve[w].frac])] : null;
+    // weekly plan points; the last one sits on the planned finish day, not the Sunday after it
+    const plan = src.weekStart ? [[src.start || p.start, 0], ...keys.map(w => {
+      let d = addDays(src.weekStart, w * 7 + 6);
+      if (src.finish && d > src.finish && addDays(src.weekStart, w * 7) <= src.finish) d = src.finish;
+      return [d, curve[w].frac];
+    })] : null;
     const end = src.finish;
     const last = rows[rows.length - 1];
     let spi = null, eff = null, forecast = null, forecastRaw = null;
+    const workday = d => { let x = d; for (let i = 0; i < 7 && !p.a.workDays.includes(dow(x)); i++) x = addDays(x, 1); return x; };
     const project = (spiX, from, startPct) => {
-      let cur = startPct, prevY = planAt(from);
+      let cur = startPct, prevY = planAt(from), prevD = from;
       for (const [d, y] of plan) {
         if (d <= from) continue;
-        cur += Math.max(0, y - prevY) * spiX; prevY = Math.max(prevY, y);
-        if (cur >= 0.9999) return d;
+        const step = Math.max(0, y - prevY) * spiX;
+        if (cur + step >= 0.9999 && step > 0) {
+          // finish part-way through this step, to the day
+          const t = (0.9999 - cur) / step;
+          return workday(addDays(prevD, Math.max(0, Math.round(t * daysBetween(prevD, d)))));
+        }
+        cur += step; prevY = Math.max(prevY, y); prevD = d;
       }
       const pe = plan[plan.length - 1][0], span = Math.max(1, daysBetween(src.start || p.start, pe));
       return addDays(pe > from ? pe : from, Math.ceil((1 - cur) * span / spiX));
     };
     if (last) eff = last.cumH > 0 ? last.earned / last.cumH : null;
+    // What earned-per-logged-hour the plan itself implies: planned earned hours divided by the
+    // hours the team is booked for (timesheets include meetings, holidays aside, ramp-up and waiting).
+    let effPlan = null;
+    if (last && p.team.length && p.start) {
+      const c = capacityIn(p, p.team, p.start, addDays(last.week, 6));
+      const booked = c.ded.gross - c.ded.holidays - c.ded.leave;
+      if (booked > 0 && last.plannedPct > 0) effPlan = last.plannedPct * W.V / booked;
+    }
     if (last && last.plannedPct > 0) {
       spi = last.pct / last.plannedPct;
       if (spi > 0 && plan && plan.length > 1) {
@@ -743,7 +777,7 @@ const ENGINE = (() => {
         forecast = project(Math.min(1.25, Math.max(0.3, 1 + (spi - 1) * conf)), from, last.pct);
       }
     }
-    return { rows, plan, end, spi, eff, forecast, forecastRaw, last, sched: s, src, W, curve, baseline: !!p.baseline,
+    return { rows, plan, end, spi, eff, effPlan, effIndex: eff != null && effPlan ? eff / effPlan : null, forecast, forecastRaw, last, sched: s, src, W, curve, baseline: !!p.baseline,
       designPerTC: W.wD, execPerRun: W.wX, autoPerTC: W.wA };
   }
 
@@ -788,18 +822,28 @@ const ENGINE = (() => {
     };
     const weekEnd = addDays(week, 6);
     const ms = T.sched && T.sched.ms ? Object.entries(T.sched.ms).filter(([k, v]) => !k.endsWith(':done') && v.date > weekEnd && v.date <= addDays(weekEnd, 14)).map(([, v]) => v).sort((x, y) => x.date < y.date ? -1 : 1) : [];
-    // Status uses the current pace at face value.
+    // Work on modules that aren't in the baseline: shown separately, not counted as progress.
+    const outside = p.modules.filter(m => !W.mods.some(x => x.id === m.id)).map(m => ({ id: m.id, name: m.name,
+      act: row.cumMods[m.id] || { designed: 0, automated: 0, executed: 0 }, week: { designed: nn((weekCounts[m.id] || {}).designed), automated: nn((weekCounts[m.id] || {}).automated), executed: nn((weekCounts[m.id] || {}).executed) } }));
+    // Lateness is measured against the baselined target; a moved target is reported, not absorbed.
+    const target = (p.baseline && p.baseline.end) || p.end || '';
+    const targetChanged = p.baseline && p.baseline.end && (p.end || '') !== p.baseline.end ? { from: p.baseline.end, to: p.end || '' } : null;
+    // Status uses the current pace at face value, with two allowances: on-plan pace (0.97+) isn't
+    // flagged for a couple of days of rounding, and the first weeks (under 10% done, fewer than 4
+    // weeks logged) can be "At risk" but not "Behind".
     let st = 'ok';
     if (T.spi != null) st = T.spi >= 0.97 ? 'ok' : T.spi >= 0.85 ? 'risk' : 'no';
-    const target = p.end || src.end;
-    const late = target && T.forecastRaw && T.forecastRaw > target ? daysBetween(target, T.forecastRaw) : 0;
+    let late = target && T.forecastRaw && T.forecastRaw > target ? daysBetween(target, T.forecastRaw) : 0;
+    if (late > 0 && T.spi != null && T.spi >= 0.97 && late <= 3) late = 0;
     if (late > 0) { const span = Math.max(1, daysBetween(p.start, target)); st = late / span > 0.1 ? 'no' : (st === 'ok' ? 'risk' : st); }
-    return { week, weekEnd, weekNo: wIdx + 1, row, T, mods, ot, totals, thisPlan, toPlan, nextPlan, ms, status: st, late, warnings,
-      hoursWeek: nn(row.hours), hoursToDate: row.cumH, spi: T.spi, eff: T.eff, forecast: T.forecastRaw, forecastSmoothed: T.forecast,
+    const early = row.pct < 0.10 && T.rows.length < 4;
+    if (early && st === 'no') st = 'risk';
+    return { week, weekEnd, weekNo: wIdx + 1, row, T, mods, ot, outside, totals, thisPlan, toPlan, nextPlan, ms, status: st, late, warnings, target, targetChanged, early,
+      hoursWeek: hoursOf(row), hoursToDate: row.cumH, spi: T.spi, eff: T.eff, effPlan: T.effPlan, effIndex: T.effIndex, forecast: T.forecastRaw, forecastSmoothed: T.forecast,
       plannedFinish: T.end, baseline: p.baseline ? { at: p.baseline.at, reason: p.baseline.reason } : null, history: p.baselineHistory || [] };
   }
 
-  return { defaults, defaultHolidays, newModule, newResource, newProject, migrate, effort, oneTimeBuckets, analyse, capacityIn, schedule, tracking, weekReport, compactPlan, makeBaseline, baselineVariance, generateHolidays, OT_PHASES,
+  return { defaults, defaultHolidays, newModule, newResource, newProject, migrate, effort, oneTimeBuckets, analyse, capacityIn, schedule, tracking, weekReport, compactPlan, makeBaseline, baselineVariance, generateHolidays, OT_PHASES, hoursOf,
     toS, toD, addDays, dow, mondayOf, daysBetween, uid, hireTeam, CATS };
 })();
 if (typeof module !== 'undefined' && module.exports) module.exports = ENGINE;

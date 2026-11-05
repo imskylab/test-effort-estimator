@@ -82,10 +82,11 @@ function audit(user, method, key, body) {
 function backup() {
   if (!fs.existsSync(DB_FILE)) return;
   const dir = path.join(DATA_DIR, 'backups'); fs.mkdirSync(dir, { recursive: true });
-  const name = 'db-' + new Date().toISOString().slice(0, 10) + '.json';
+  const t = new Date(), slot = String(Math.floor(t.getUTCHours() / 6) * 6).padStart(2, '0');
+  const name = 'db-' + t.toISOString().slice(0, 10) + 'T' + slot + '.json';
   fs.copyFile(DB_FILE, path.join(dir, name), () => {
     const files = fs.readdirSync(dir).filter(f => f.startsWith('db-')).sort();
-    files.slice(0, Math.max(0, files.length - 14)).forEach(f => fs.unlink(path.join(dir, f), () => { }));
+    files.slice(0, Math.max(0, files.length - 28)).forEach(f => fs.unlink(path.join(dir, f), () => { }));
   });
 }
 backup(); setInterval(backup, 6 * 3600 * 1000).unref();
@@ -99,33 +100,71 @@ function parsePath(p, wantDoc) {
 }
 
 /* ---------- validation of known document shapes ---------- */
-const isObj = v => v && typeof v === 'object' && !Array.isArray(v);
-const DATE = /^\d{4}-\d{2}-\d{2}$/;
+const isObj = v => v !== null && typeof v === 'object' && !Array.isArray(v);
+const BAD_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+// Remove keys that could reach Object.prototype, at every level.
+function clean(v) {
+  if (Array.isArray(v)) return v.map(clean);
+  if (!isObj(v)) return v;
+  const out = {};
+  for (const k of Object.keys(v)) if (!BAD_KEYS.has(k)) out[k] = clean(v[k]);
+  return out;
+}
+const realDate = s => { if (typeof s !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(s)) return false; const t = Date.parse(s + 'T00:00:00Z'); return !isNaN(t) && new Date(t).toISOString().slice(0, 10) === s; };
+const num = (v, lo, hi) => typeof v === 'number' && isFinite(v) && v >= lo && v <= hi;
+const optNum = (v, lo, hi) => v == null || v === '' || num(v, lo, hi);
+const str = (v, max) => v == null || (typeof v === 'string' && v.length <= max);
+// Only these document paths can be written: projects/<id> and projects/<id>/actuals/<week>
+function writable(key) {
+  const s = key.split('/');
+  return (s.length === 2 && s[0] === 'projects') || (s.length === 4 && s[0] === 'projects' && s[2] === 'actuals');
+}
 function validate(key, body) {
   const segs = key.split('/');
-  if (segs[0] === 'projects' && segs.length === 2) {
-    if (typeof body.name !== 'string') return 'Project needs a name';
+  if (segs.length === 2) {
+    if (typeof body.name !== 'string' || body.name.length > 300) return 'Project needs a name (up to 300 characters)';
     const d = body.data;
     if (!isObj(d)) return 'Project needs a data object';
     for (const k of ['modules', 'team', 'holidays']) if (!Array.isArray(d[k])) return `Project data needs a ${k} list`;
-    if (typeof d.start !== 'string' || !DATE.test(d.start)) return 'Project start must be a date (YYYY-MM-DD)';
-    if (d.end && !DATE.test(d.end)) return 'Project end must be a date (YYYY-MM-DD) or empty';
+    if (!realDate(d.start)) return 'Project start must be a real date (YYYY-MM-DD)';
+    if (d.end && !realDate(d.end)) return 'Project end must be a real date (YYYY-MM-DD) or empty';
+    if (d.end && d.end < d.start) return 'Project end must be after the start';
     if (!isObj(d.a)) return 'Project data needs its factors';
-    if (d.modules.some(m => !isObj(m) || typeof m.id !== 'string')) return 'Every module needs an id';
-    if (d.team.some(r => !isObj(r))) return 'Team entries must be objects';
+    if (d.modules.length > 500 || d.team.length > 500 || d.holidays.length > 5000) return 'Too many modules, people or holidays';
+    for (const m of d.modules) {
+      if (!isObj(m) || typeof m.id !== 'string') return 'Every module needs an id';
+      if (!str(m.name, 300)) return 'Module names must be text';
+      if (!num(m.tcs, 0, 1e6)) return `Module “${m.name}”: test cases must be a number from 0 to 1,000,000`;
+      if (!isObj(m.mix) || Object.values(m.mix).some(v => !optNum(v, 0, 100))) return `Module “${m.name}”: complexity mix must be percentages from 0 to 100`;
+      if (!optNum(m.autoPct, 0, 100)) return `Module “${m.name}”: % to automate must be 0 to 100`;
+      if (m.availableFrom && !realDate(m.availableFrom)) return `Module “${m.name}”: available-from must be a real date`;
+    }
+    for (const r of d.team) {
+      if (!isObj(r)) return 'Team entries must be objects';
+      if (!optNum(r.alloc, 0, 100)) return `${r.name || 'A team member'}: allocation must be 0 to 100%`;
+      if ((r.start && !realDate(r.start)) || (r.end && !realDate(r.end))) return `${r.name || 'A team member'}: dates must be real dates`;
+      if (r.leaves && (!Array.isArray(r.leaves) || r.leaves.some(l => !isObj(l) || (l.from && !realDate(l.from)) || (l.to && !realDate(l.to))))) return `${r.name || 'A team member'}: leave dates must be real dates`;
+    }
+    if (d.holidays.some(h => !isObj(h) || !realDate(h.date) || !str(h.name, 200))) return 'Every holiday needs a real date and a name';
   }
-  if (segs[0] === 'projects' && segs[2] === 'actuals' && segs.length === 4) {
-    if (body.week != null && !DATE.test(body.week)) return 'Week must be a date (YYYY-MM-DD)';
+  if (segs.length === 4) {
+    if (body.week != null && !realDate(body.week)) return 'Week must be a real date (YYYY-MM-DD)';
+    if (!optNum(body.hours, 0, 1e6)) return 'Hours must be 0 or more';
+    if (body.hoursBy != null && (!isObj(body.hoursBy) || Object.values(body.hoursBy).some(v => !optNum(v, 0, 200)))) return 'Hours per person must be 0 to 200 a week';
+    if (!str(body.notes, 20000) || !str(body.blockers, 20000)) return 'Notes are too long';
     if (body.mods != null && !isObj(body.mods)) return 'mods must be an object';
     if (isObj(body.mods)) for (const v of Object.values(body.mods)) {
       if (!isObj(v)) return 'Each module entry must be an object';
-      for (const k of ['designed', 'automated', 'executed']) if (v[k] != null && (typeof v[k] !== 'number' || v[k] < 0 || !isFinite(v[k]))) return `${k} must be a number of 0 or more`;
+      for (const k of ['designed', 'automated', 'executed']) if (!optNum(v[k], 0, 1e6)) return `${k} must be a number of 0 or more`;
     }
+    if (body.ot != null && (!isObj(body.ot) || Object.values(body.ot).some(v => !optNum(v, 0, 100)))) return 'Setup and framework progress must be 0 to 100%';
   }
   return null;
 }
 function deepMerge(target, patch) {
-  for (const [k, v] of Object.entries(patch)) {
+  for (const k of Object.keys(patch)) {
+    if (BAD_KEYS.has(k)) continue;
+    const v = patch[k];
     if (isObj(v) && isObj(target[k])) deepMerge(target[k], v);
     else target[k] = v;
   }
@@ -149,13 +188,18 @@ function readBody(req) {
 }
 async function jsonBody(req, res) {
   let body;
-  try { body = JSON.parse(await readBody(req)); }
+  try { body = clean(JSON.parse(await readBody(req))); }
   catch (e) { send(res, e.message === 'too_large' ? 413 : 400, { code: 'invalid_argument', message: 'Body must be a JSON object under 5 MB' }); return null; }
   if (!isObj(body)) { send(res, 400, { code: 'invalid_argument', message: 'Body must be a JSON object' }); return null; }
   return body;
 }
 
 const server = http.createServer(async (req, res) => {
+  // Without logins the server only serves this machine; also refuse other Host names (DNS rebinding).
+  if (!AUTH_ON) {
+    const host = String(req.headers.host || '').replace(/:\d+$/, '').replace(/^\[|\]$/g, '');
+    if (!['localhost', '127.0.0.1', '::1'].includes(host)) { res.writeHead(403, SEC); return res.end('Forbidden host'); }
+  }
   const user = whoIs(req);
   if (!user) { res.writeHead(401, { 'WWW-Authenticate': 'Basic realm="Test Effort Estimator"', ...SEC }); return res.end('Login required'); }
   const url = new URL(req.url, 'http://x');
@@ -168,8 +212,12 @@ const server = http.createServer(async (req, res) => {
       const key = parsePath(p.slice(9), true);
       if (!key) return send(res, 400, { code: 'invalid_argument', message: 'Bad document path' });
       if (req.method === 'GET') return db[key] ? send(res, 200, { id: key.split('/').pop(), data: db[key] }) : send(res, 404, { code: 'not_found' });
+      if (req.method !== 'GET' && !writable(key)) return send(res, 403, { code: 'invalid_argument', message: 'Only projects and their weekly actuals can be saved' });
       if (req.method === 'PUT') {
         const body = await jsonBody(req, res); if (!body) return;
+        // create-only: never replace a document someone else already created
+        const createOnly = body.createOnly === true; delete body.createOnly;
+        if (createOnly && db[key]) return send(res, 409, { code: 'exists', message: 'Already exists', current: db[key] });
         // optimistic concurrency: the client says which revision it edited
         const prevRev = body.prevRev; delete body.prevRev;
         if (prevRev !== undefined && db[key] && db[key].rev !== undefined && db[key].rev !== prevRev) {
@@ -228,4 +276,4 @@ if (require.main === module) {
   const shutdown = () => { server.close(); setTimeout(() => process.exit(0), writing || pending ? 500 : 0); };
   process.on('SIGINT', shutdown); process.on('SIGTERM', shutdown);
 }
-module.exports = { server, validate, deepMerge };
+module.exports = { server, validate, deepMerge, clean };

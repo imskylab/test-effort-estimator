@@ -21,7 +21,7 @@ function start(env) {
   });
   return { child, dir, base: `http://127.0.0.1:${p}`, ready, stop: () => child.kill() };
 }
-const project = (name, rev) => ({ name, rev, data: { name, start: '2026-11-16', end: '', modules: [{ id: 'm1' }], team: [], holidays: [], a: {} } });
+const project = (name, rev) => ({ name, rev, data: { name, start: '2026-11-16', end: '', modules: [{ id: 'm1', name: 'M', tcs: 10, mix: { S: 100 } }], team: [], holidays: [], a: {} } });
 const req = (base, method, url, body, headers = {}) => fetch(base + url, { method, headers: { 'Content-Type': 'application/json', ...headers }, body: body ? JSON.stringify(body) : undefined });
 
 test('saves, reads, rejects a stale save, merges partial updates', async () => {
@@ -90,5 +90,57 @@ test('logins are required and every change is attributed', async () => {
     await new Promise(res => setTimeout(res, 100));
     const log = fs.readFileSync(path.join(s.dir, 'audit.log'), 'utf8').trim().split('\n').map(JSON.parse);
     assert.ok(log.some(e => e.user === 'bob' && e.method === 'PUT' && e.path === 'projects/p1'));
+  } finally { s.stop(); }
+});
+
+test('prototype keys cannot crash or poison the server', async () => {
+  const s = start({ BASIC_AUTH: 'alice:pw1' }); await s.ready;
+  const auth = { Authorization: 'Basic ' + Buffer.from('alice:pw1').toString('base64') };
+  try {
+    await req(s.base, 'PUT', '/api/doc/projects/p/actuals/2026-11-16', { week: '2026-11-16', mods: {} }, auth);
+    const raw = (method, body) => fetch(s.base + '/api/doc/projects/p/actuals/2026-11-16', { method, headers: { 'Content-Type': 'application/json', ...auth }, body });
+    await raw('PATCH', '{"__proto__":{"hasOwnProperty":1,"rev":"x"}}');
+    await raw('PATCH', '{"mods":{"__proto__":{"polluted":1}},"constructor":{"prototype":{"bad":1}}}');
+    await raw('PUT', '{"week":"2026-11-16","__proto__":{"isAdmin":true}}');
+    const r = await req(s.base, 'GET', '/api/health', null, auth);
+    assert.strictEqual(r.status, 200, 'server still up');
+    const r2 = await req(s.base, 'PUT', '/api/doc/projects/p2', project('A', 'r1'), auth);
+    assert.strictEqual(r2.status, 200, 'unrelated saves are unaffected');
+  } finally { s.stop(); }
+});
+
+test('strict validation: impossible dates, negative counts, bad mixes, other collections', async () => {
+  const s = start({}); await s.ready;
+  try {
+    const bad = async (url, body) => (await req(s.base, 'PUT', url, body)).status;
+    const P = project('A', 'r1');
+    assert.strictEqual(await bad('/api/doc/projects/x', { ...P, data: { ...P.data, start: '2026-13-45' } }), 400);
+    assert.strictEqual(await bad('/api/doc/projects/x', { ...P, data: { ...P.data, modules: [{ id: 'm', tcs: -500, mix: {} }] } }), 400);
+    assert.strictEqual(await bad('/api/doc/projects/x', { ...P, data: { ...P.data, modules: [{ id: 'm', tcs: 5, mix: { S: 'bad' } }] } }), 400);
+    assert.strictEqual(await bad('/api/doc/projects/x', { ...P, data: { ...P.data, team: [{ alloc: 500 }] } }), 400);
+    assert.strictEqual(await bad('/api/doc/projects/x/actuals/w', { week: '2026-11-16', hours: -3 }), 400);
+    assert.strictEqual(await bad('/api/doc/junk/j1', { a: 1 }), 403);
+    assert.strictEqual(await bad('/api/doc/projects/x', P), 200);
+  } finally { s.stop(); }
+});
+
+test('create-only never replaces an existing week', async () => {
+  const s = start({}); await s.ready;
+  try {
+    let r = await req(s.base, 'PUT', '/api/doc/projects/p/actuals/2026-11-16', { week: '2026-11-16', mods: { m: { designed: 30 } }, createOnly: true });
+    assert.strictEqual(r.status, 200);
+    r = await req(s.base, 'PUT', '/api/doc/projects/p/actuals/2026-11-16', { week: '2026-11-16', mods: {}, createOnly: true });
+    assert.strictEqual(r.status, 409);
+    const d = await (await req(s.base, 'GET', '/api/doc/projects/p/actuals/2026-11-16')).json();
+    assert.strictEqual(d.data.mods.m.designed, 30);
+  } finally { s.stop(); }
+});
+
+test('without logins, requests for other host names are refused', async () => {
+  const s = start({}); await s.ready;
+  try {
+    const http = require('node:http');
+    const status = await new Promise(res => http.get(s.base + '/api/health', { headers: { Host: 'evil.example.com' } }, r => res(r.statusCode)));
+    assert.strictEqual(status, 403);
   } finally { s.stop(); }
 });
