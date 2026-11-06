@@ -31,13 +31,19 @@ async function page(browser, base, errs) {
   return pg;
 }
 const settle = pg => pg.waitForTimeout(1500);
+// Projects in these tests started four weeks ago, so weeks can be logged.
+async function openExample(pg) {
+  await pg.click('text=Open an example project'); await settle(pg);
+  await pg.evaluate(() => { S.P.start = E.addDays(E.mondayOf(E.toS(Date.now())), -28); S.P.end = E.addDays(S.P.start, 7 * 29 - 3); touch(); });
+  await settle(pg); await pg.waitForTimeout(1000);
+}
 const api = async (base, p) => (await fetch(base + p)).json();
 
 test('every tab renders the example without errors or broken values', opts, async () => {
   const srv = await startServer(), browser = await chromium.launch(), errs = [];
   try {
     const A = await page(browser, srv.base, errs);
-    await A.click('text=Open an example project'); await settle(A);
+    await openExample(A);
     for (const tab of ['summary', 'schedule', 'scope', 'team', 'calendar', 'factors', 'tracking']) {
       await A.click(`[data-tab=${tab}]`); await A.waitForTimeout(400);
       const text = await A.innerText('#main');
@@ -51,7 +57,7 @@ test('two people editing different fields are merged; the same field asks', opts
   const srv = await startServer(), browser = await chromium.launch(), errs = [];
   try {
     const A = await page(browser, srv.base, errs);
-    await A.click('text=Open an example project'); await settle(A);
+    await openExample(A);
     const B = await page(browser, srv.base, errs); await settle(B);
     await A.click('[data-tab=scope]'); await B.click('[data-tab=scope]');
     await A.fill('#f-modules-0-tcs', '310'); await B.fill('#f-modules-1-tcs', '170');
@@ -81,7 +87,7 @@ test('weekly actuals: modules merge, a stale "Log next week" never wipes a week,
   const srv = await startServer(), browser = await chromium.launch(), errs = [];
   try {
     const A = await page(browser, srv.base, errs);
-    await A.click('text=Open an example project'); await settle(A);
+    await openExample(A);
     const B = await page(browser, srv.base, errs); await settle(B);
     await A.click('[data-tab=tracking]'); await B.click('[data-tab=tracking]');
     await A.click('[data-act=add-week]'); await settle(A);
@@ -112,7 +118,7 @@ test('an edited email cannot be copied once its numbers change', opts, async () 
   const srv = await startServer(), browser = await chromium.launch(), errs = [];
   try {
     const A = await page(browser, srv.base, errs);
-    await A.click('text=Open an example project'); await settle(A);
+    await openExample(A);
     await A.click('[data-tab=tracking]'); await A.click('[data-act=add-week]'); await settle(A);
     const wk = await A.evaluate(() => S.trWeek), ids = await A.evaluate(() => S.P.modules.map(m => m.id));
     await A.click('#mail-preview'); await A.keyboard.press('End'); await A.keyboard.type(' edited');
@@ -120,6 +126,61 @@ test('an edited email cannot be copied once its numbers change', opts, async () 
     assert.ok(await A.$eval('[data-act=mail-copy]', b => b.disabled));
     const text = await A.innerText('#mail-preview');
     assert.ok(!/undefined|NaN/.test(text));
+    assert.deepStrictEqual(errs, []);
+  } finally { await browser.close(); srv.stop(); }
+});
+
+test('two people editing different rows of a factor table: no crash, both kept', opts, async () => {
+  const srv = await startServer(), browser = await chromium.launch(), errs = [];
+  try {
+    const A = await page(browser, srv.base, errs);
+    await openExample(A);
+    const B = await page(browser, srv.base, errs); await settle(B);
+    await A.click('[data-tab=factors]'); await B.click('[data-tab=factors]');
+    await A.fill('#f-a-complexity-0-auto', '4'); await B.fill('#f-a-complexity-2-auto', '15');
+    await A.press('#f-a-complexity-0-auto', 'Tab'); await B.press('#f-a-complexity-2-auto', 'Tab');
+    await settle(A); await settle(B); await A.waitForTimeout(4500); await settle(A); await settle(B);
+    const d = (await api(srv.base, '/api/col/projects')).docs[0].data.data;
+    assert.strictEqual(d.a.complexity[0].auto, 4); assert.strictEqual(d.a.complexity[2].auto, 15);
+    assert.ok(await B.$('[data-tab=summary]'), 'page still works');
+    await B.click('[data-tab=summary]'); await B.waitForTimeout(800);
+    assert.ok((await B.innerText('#main')).length > 100);
+    assert.deepStrictEqual(errs, []);
+  } finally { await browser.close(); srv.stop(); }
+});
+
+test('a project deleted while someone edits it is not brought back silently; undo restores it', opts, async () => {
+  const srv = await startServer(), browser = await chromium.launch(), errs = [];
+  try {
+    const A = await page(browser, srv.base, errs);
+    await openExample(A);
+    const B = await page(browser, srv.base, errs); await settle(B);
+    // A is mid-edit when B deletes the project
+    await A.click('[data-tab=scope]'); await A.fill('#f-modules-0-tcs', '333');
+    await B.click('[data-act=del]'); await B.click('[data-act=del-yes]');
+    await A.press('#f-modules-0-tcs', 'Tab'); await settle(A); await A.waitForTimeout(4500);
+    assert.ok(await A.$('[data-act=restore-mine]'), 'A is told the project was deleted');
+    let docs = (await api(srv.base, '/api/col/projects')).docs;
+    assert.ok(docs[0].data.deletedAt, 'still deleted');
+    await B.click('#toast [data-act=restore-project]'); await settle(B);
+    docs = (await api(srv.base, '/api/col/projects')).docs;
+    assert.ok(!docs[0].data.deletedAt, 'undo restored it');
+    assert.deepStrictEqual(errs, []);
+  } finally { await browser.close(); srv.stop(); }
+});
+
+test('removing a week asks first and can be undone', opts, async () => {
+  const srv = await startServer(), browser = await chromium.launch(), errs = [];
+  try {
+    const A = await page(browser, srv.base, errs);
+    await openExample(A);
+    await A.click('[data-tab=tracking]'); await A.click('[data-act=add-week]'); await settle(A);
+    await A.click('[data-act=rm-ac-ask]'); await A.waitForTimeout(300);
+    assert.ok(await A.$('[data-act=rm-ac]'), 'asks before removing');
+    await A.click('[data-act=rm-ac]'); await settle(A);
+    assert.strictEqual(await A.evaluate(() => liveActuals().length), 0);
+    await A.click('#toast [data-act=restore-week]'); await settle(A);
+    assert.strictEqual(await A.evaluate(() => liveActuals().length), 1);
     assert.deepStrictEqual(errs, []);
   } finally { await browser.close(); srv.stop(); }
 });

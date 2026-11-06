@@ -376,3 +376,61 @@ test('productivity is compared with what the plan implies, not with 1.0', () => 
   const T2 = E.tracking(p, acts, s);
   assert.ok(Math.abs(T2.effIndex - 1) < 0.05, `on-plan team logging booked hours scores about 1.0, got ${T2.effIndex}`);
 });
+
+/* ---------- third review fixes ---------- */
+test('removed and renamed modules after the baseline', () => {
+  const p = exampleTeam(project());
+  p.modules.push(Object.assign(E.newModule('Second', 2), { tcs: 80 }));
+  const s = E.schedule(p);
+  p.end = s.finish; p.baseline = E.makeBaseline(p, s, 'agreed');
+  const acts = onPlanActuals(p, s, 8);
+  const before = E.weekReport(p, acts, s, acts[7].week);
+  p.modules[0].name = 'Renamed portal';
+  p.modules.splice(1, 1); // remove "Second"
+  const after = E.weekReport(p, acts, null, acts[7].week);
+  assert.ok(!after.mods.some(m => m.baselineName === 'Second'), 'removed module is not reported as behind');
+  assert.strictEqual(after.mods[0].name, 'Renamed portal', 'current name is used');
+  assert.ok(after.changes.some(c => /removed/.test(c)) && after.changes.some(c => /renamed/.test(c)));
+  assert.ok(Math.abs(after.spi - 1) < 0.05, `still on plan for the remaining scope (spi ${after.spi}, was ${before.spi})`);
+});
+
+test('scope growth and plan drift since the baseline are reported, not hidden', () => {
+  const p = trackedProject();
+  const s = E.schedule(p);
+  p.end = s.finish; p.baseline = E.makeBaseline(p, s, 'agreed');
+  const acts = onPlanActuals(p, s, 6);
+  p.modules[0].tcs *= 2;
+  p.a.complexity.forEach(c => { c.auto *= 2; });
+  const R = E.weekReport(p, acts, null, acts[5].week);
+  assert.ok(R.changes.some(c => /test cases/.test(c)), 'module growth listed');
+  assert.ok(R.drift && R.drift.days > 0, 'plan drift reported');
+  assert.notStrictEqual(R.status, 'ok', 'a plan that no longer meets the target is not on track');
+});
+
+test('a finished project forecasts the week it finished, on a working day', () => {
+  const p = trackedProject();
+  const s = E.schedule(p);
+  p.baseline = E.makeBaseline(p, s, 'agreed');
+  const all = onPlanActuals(p, s, 200);
+  const T = E.tracking(p, all, s);
+  assert.ok(T.last.pct >= 0.9999);
+  assert.ok(p.a.workDays.includes(E.dow(T.forecastRaw)), 'forecast is a working day');
+  assert.ok(T.forecastRaw <= E.addDays(T.last.week, 6));
+});
+
+test('priced team time for the recommended team includes the leads it recommends', () => {
+  const p = project({ end: '2027-03-31' });
+  p.team = [Object.assign(E.newResource(1), { activity: 'Both' })];
+  const A = E.analyse(p);
+  assert.ok(A.need.extra > 0 && A.need.needLeads > 0, 'needs people and a lead');
+  assert.ok(A.need.totalFte >= 1 + A.need.extra + A.need.needLeads - 1e-9);
+});
+
+test('invalid saved settings are repaired on load instead of breaking the page', () => {
+  const p = project();
+  p.a.complexity = 'oops'; p.a.hoursPerDay = -8; p.modules[0].tcs = 'x';
+  E.migrate(p);
+  assert.ok(Array.isArray(p.a.complexity) && p.a.hoursPerDay === 8 && p.modules[0].tcs === 0);
+  assert.ok(p._repaired.includes('complexity'));
+  assert.ok(E.analyse(p).e.total >= 0);
+});

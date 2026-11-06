@@ -12,7 +12,7 @@ const fd = s => { if (!s) return '—'; const [y, m, d] = s.split('-'); return `
 const fdShort = s => { const [, m, d] = s.split('-'); return `${+d} ${MON[+m - 1]}`; };
 const DOWN = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
-const S = { db: null, dl: null, list: [], id: null, P: null, actuals: [], tab: 'summary', saving: '', rev: null,
+const S = { db: null, dl: null, list: [], all: [], id: null, P: null, actuals: [], tab: 'summary', saving: '', rev: null,
   local: false, unsubP: null, unsubA: null, openLeaves: {}, confirmDel: false, A: null };
 
 /* ---------- persistence ---------- */
@@ -29,53 +29,110 @@ function touch() {
  * window by id, the baseline and its history. Units changed by only one side are taken from that
  * side; units changed by both, differently, are conflicts the user decides. */
 const ARRAYS = ['modules', 'team', 'holidays', 'downtimes'];
+const A_ROWS = { complexity: 'key', appTypes: 'key', testData: 'key', levels: 'key', skills: 'key', roles: 'key', oneTime: 'id' };
+const TOP = ['name', 'client', 'start', 'end', 'locations', 'baseline', 'baselineHistory'];
+const ROW = '__row__';
+// Flatten a plan into small "units": each field of each module, person, holiday and factor row is its own unit.
 function planUnits(P) {
   const u = {};
-  ['name', 'client', 'start', 'end', 'locations', 'baseline', 'baselineHistory'].forEach(k => { if (P[k] !== undefined) u[k] = P[k]; });
+  const rows = (prefix, arr, idk) => (arr || []).forEach((x, i) => {
+    const id = String(x && x[idk] != null ? x[idk] : 'i' + i);
+    u[`${prefix}#${id}`] = ROW;
+    Object.entries(x || {}).forEach(([f, v]) => { u[`${prefix}#${id}.${f}`] = v; });
+  });
+  TOP.forEach(k => { if (P[k] !== undefined) u[k] = P[k]; });
   Object.entries(P.notes || {}).forEach(([k, v]) => { u['notes.' + k] = v; });
-  Object.entries(P.a || {}).forEach(([k, v]) => { u['a.' + k] = v; });
-  ARRAYS.forEach(k => (P[k] || []).forEach((x, i) => { u[k + '#' + (x.id || 'i' + i)] = x; }));
+  Object.entries(P.a || {}).forEach(([k, v]) => {
+    if (A_ROWS[k] && Array.isArray(v)) rows('a.' + k, v, A_ROWS[k]);
+    else if (v && typeof v === 'object' && !Array.isArray(v)) Object.entries(v).forEach(([kk, vv]) => { u[`a.${k}.${kk}`] = vv; });
+    else u['a.' + k] = v;
+  });
+  ARRAYS.forEach(k => rows(k, P[k], 'id'));
   return u;
 }
 const same = (x, y) => JSON.stringify(x) === JSON.stringify(y);
+const rowOf = k => { const m = k.match(/^(.*#[^.]*)\./); return m ? m[1] : null; };
+// Three-way merge: units changed by one side come from that side; units both changed differently are conflicts.
 function merge3(base, mine, theirs) {
   const B = planUnits(base), M = planUnits(mine), T = planUnits(theirs);
   const keys = new Set([...Object.keys(B), ...Object.keys(M), ...Object.keys(T)]);
-  const out = {}, conflicts = [];
+  const out = {}, conflicts = [], rowConflicts = new Set();
   keys.forEach(k => {
     const b = B[k], m = M[k], t = T[k];
     if (same(m, t)) { if (m !== undefined) out[k] = m; }
     else if (same(m, b)) { if (t !== undefined) out[k] = t; }
     else if (same(t, b)) { if (m !== undefined) out[k] = m; }
-    else { conflicts.push({ key: k, mine: m, theirs: t }); if (m !== undefined) out[k] = m; }
+    else {
+      // one side removed the whole row while the other edited it: ask about the row, not the field
+      const r = rowOf(k);
+      if (r && (M[r] === undefined || T[r] === undefined)) { rowConflicts.add(r); if (m !== undefined) out[k] = m; return; }
+      conflicts.push({ key: k, mine: m, theirs: t }); if (m !== undefined) out[k] = m;
+    }
   });
-  return { units: out, conflicts, order: { mine, theirs } };
+  rowConflicts.forEach(r => {
+    conflicts.push({ key: r, mine: M[r], theirs: T[r], row: true });
+    // keep the row for now; the user's choice decides
+    out[r] = ROW;
+    const pre = r + '.';
+    Object.keys(M).forEach(k => { if (k.startsWith(pre) && !(k in out)) out[k] = M[k]; });
+    Object.keys(T).forEach(k => { if (k.startsWith(pre) && !(k in out)) out[k] = T[k]; });
+  });
+  return { units: out, conflicts, order: { mine, theirs }, M, T };
 }
 function buildPlan(units, mine, theirs) {
   const P = JSON.parse(JSON.stringify(mine));
-  ['name', 'client', 'start', 'end', 'locations', 'baseline', 'baselineHistory'].forEach(k => { if (k in units) P[k] = units[k]; else delete P[k]; });
-  P.notes = {}; P.a = Object.assign({}, mine.a);
-  Object.keys(P.a).forEach(k => { if (!('a.' + k in units)) delete P.a[k]; });
-  Object.entries(units).forEach(([k, v]) => { if (k.startsWith('notes.')) P.notes[k.slice(6)] = v; if (k.startsWith('a.')) P.a[k.slice(2)] = v; });
-  ARRAYS.forEach(k => {
-    const ids = [...(theirs[k] || []), ...(mine[k] || [])].map((x, i) => k + '#' + (x.id || 'i' + i));
-    const seen = new Set();
-    P[k] = ids.filter(id => !seen.has(id) && seen.add(id) && id in units).map(id => units[id]);
+  TOP.forEach(k => { if (k in units) P[k] = units[k]; else delete P[k]; });
+  P.notes = {};
+  const a = {};
+  const idsOf = prefix => {
+    const ids = [], re = new RegExp('^' + prefix.replace(/[.#]/g, '\\$&') + '#([^.]*)$');
+    [theirs, mine].forEach(src => Object.keys(planUnits(src)).forEach(k => { const m = k.match(re); if (m && !ids.includes(m[1])) ids.push(m[1]); }));
+    Object.keys(units).forEach(k => { const m = k.match(re); if (m && !ids.includes(m[1])) ids.push(m[1]); });
+    return ids;
+  };
+  const rowsOf = prefix => idsOf(prefix).filter(id => units[`${prefix}#${id}`] === ROW).map(id => {
+    const o = {}, pre = `${prefix}#${id}.`;
+    Object.entries(units).forEach(([k, v]) => { if (k.startsWith(pre)) o[k.slice(pre.length)] = v; });
+    return o;
   });
+  Object.entries(units).forEach(([k, v]) => {
+    if (k.startsWith('notes.')) P.notes[k.slice(6)] = v;
+    else if (k.startsWith('a.') && !k.includes('#')) {
+      const parts = k.slice(2).split('.');
+      if (parts.length === 1) a[parts[0]] = v; else { a[parts[0]] = a[parts[0]] || {}; a[parts[0]][parts.slice(1).join('.')] = v; }
+    }
+  });
+  Object.keys(A_ROWS).forEach(k => { const r = rowsOf('a.' + k); if (r.length) a[k] = r; });
+  P.a = a;
+  ARRAYS.forEach(k => { P[k] = rowsOf(k); });
   return P;
 }
+const FIELD_NAMES = { tcs: 'test cases', autoPct: '% to automate', mix: 'complexity mix', appType: 'app type', priority: 'priority', availableFrom: 'available from', testData: 'test data', design: 'manual design', manualExec: 'manual execution', automation: 'automation', name: 'name',
+  role: 'role', activity: 'works on', level: 'experience', skill: 'tool skill', alloc: 'allocation', location: 'location', start: 'start', end: 'end', leaves: 'leave',
+  date: 'date', design_: 'design hours', auto: 'automation hours', exec: 'manual run hours', factor: 'factor', productivity: 'productivity', rampDays: 'ramp-up days', hours: 'hours', phase: 'when', on: 'included', nonDevPct: 'non-development %', extraRamp: 'extra ramp days', impact: 'impact', reason: 'reason', from: 'from', to: 'to' };
 function unitLabel(key, M) {
-  const [k, id] = key.split('#');
-  const find = arr => ((M.mine && M.mine[arr]) || []).concat((M.theirs && M.theirs[arr]) || []).find(x => (x.id || '') === id);
-  if (k === 'modules') return `Module “${(find('modules') || {}).name || 'removed module'}”`;
-  if (k === 'team') return `Team member “${(find('team') || {}).name || 'removed person'}”`;
-  if (k === 'holidays') { const h = find('holidays') || {}; return `Holiday ${h.name || ''} ${h.date ? fd(h.date) : ''}`.trim(); }
-  if (k === 'downtimes') return 'A blocked window';
+  const m = key.match(/^(a\.)?([A-Za-z]+)#([^.]*)(?:\.(.+))?$/);
+  if (m) {
+    const [, isA, coll, id, field] = m;
+    const pick = src => ((isA ? (src.a || {})[coll] : src[coll]) || []).find(x => String(x.id != null ? x.id : x.key) === id);
+    const row = pick(M.mine || {}) || pick(M.theirs || {}) || {};
+    const what = { modules: 'Module', team: 'Team member', holidays: 'Holiday', downtimes: 'Blocked window', complexity: 'Complexity level', appTypes: 'App type', testData: 'Test data level', levels: 'Experience level', skills: 'Tool skill', roles: 'Role', oneTime: 'One-time activity' }[coll] || coll;
+    const nm = row.name || row.label || row.key || row.date || '';
+    const fieldName = isA && coll === 'complexity' && field === 'design' ? 'design hours' : (FIELD_NAMES[field] || field);
+    return `${what}${nm ? ` “${nm}”` : ''}${field ? ': ' + fieldName : ' (removed by one person, edited by the other)'}`;
+  }
   if (key.startsWith('a.')) return `Factor “${key.slice(2)}”`;
   if (key.startsWith('notes.')) return `Notes: ${key.slice(6)}`;
   return { name: 'Project name', client: 'Client', start: 'Start date', end: 'Target end date', locations: 'Locations', baseline: 'Baseline', baselineHistory: 'Baseline history' }[key] || key;
 }
-const brief = v => v === undefined ? 'removed' : typeof v === 'object' ? (v && v.tcs != null ? `${v.tcs} test cases` : v && v.alloc != null ? `${v.activity}, ${v.level}, ${v.alloc}%` : v && v.at ? `frozen ${fd(v.at)}` : 'changed') : String(v) === '' ? 'empty' : String(v).slice(0, 40);
+const brief = v => {
+  if (v === undefined) return 'removed';
+  if (v === ROW) return 'kept';
+  if (Array.isArray(v)) return `${v.length} item${v.length === 1 ? '' : 's'}`;
+  if (v && typeof v === 'object') return typeof v.at === 'string' ? `frozen ${fd(v.at)}` : JSON.stringify(v).slice(0, 40);
+  if (typeof v === 'boolean') return v ? 'on' : 'off';
+  return String(v) === '' ? 'empty' : String(v).slice(0, 40);
+};
 
 async function saveNow() {
   if (!S.P || !S.id) return;
@@ -86,21 +143,24 @@ async function saveNow() {
   try {
     // Has anyone saved since we loaded? (The self-hosted server also checks this atomically.)
     const cur = await ref.get();
+    if (cur.exists && cur.data().deletedAt) { S.deletedNotice = { by: cur.data().deletedBy, at: cur.data().deletedAt }; S.saving = 'Not saved'; renderAll(); return; }
     if (cur.exists && cur.data().rev && S.rev && cur.data().rev !== S.rev) return mergeWith(cur.data());
     await writePlan(ref);
   } catch (e) {
     if (e.code === 'conflict') { S.pendingRev = null; return mergeWith(e.current); }
+    if (e.code === 'deleted') { S.pendingRev = null; S.deletedNotice = { by: e.deletedBy, at: e.deletedAt }; S.saving = 'Not saved'; renderAll(); return; }
     S.saving = e.code === 'invalid_argument' ? (e.message && !/^invalid/.test(e.message) ? 'Not saved: ' + e.message : 'Read-only: you can view but not save') : e.code === 'quota_exceeded' ? 'Storage full: delete old projects' : 'Save failed, will retry on next edit';
   }
   S.pendingRev = null;
   renderHeader();
 }
-async function writePlan(ref, note) {
+async function writePlan(ref, note, restore) {
   const rev = E.uid();
   S.pendingRev = rev;
   const data = JSON.parse(JSON.stringify(S.P));
   const body = { name: S.P.name, client: S.P.client || '', updatedAt: Date.now(), rev, data };
-  if (S.rev) body.prevRev = S.rev;
+  if (S.rev && !restore) body.prevRev = S.rev;
+  if (restore) body.restore = true;
   await ref.set(body);
   S.rev = rev; S.baseP = data; S.saving = note || 'Saved';
 }
@@ -124,6 +184,12 @@ function setConflict(theirsDoc, conflicts, M, theirs) {
   S.saving = 'Not saved';
   renderAll();
 }
+function deletedBanner() {
+  const d = S.deletedNotice; if (!d) return '';
+  const when = d.at ? new Date(d.at).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }) : '';
+  return `<div class="banner conflict" role="alert"><b>${esc(d.by || 'A colleague')} deleted this project${when ? ' on ' + when : ''}.</b> Your recent changes aren’t saved.
+    <div class="row" style="margin-top:8px"><button class="btn" data-act="restore-mine">Restore the project with my changes</button><button class="btn" data-act="leave-deleted">Leave it deleted</button></div></div>`;
+}
 function conflictBanner() {
   const c = S.conflict; if (!c) return '';
   const when = c.at ? new Date(c.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
@@ -145,10 +211,11 @@ async function resolveConflict(useMine) {
 }
 function openProject(id) {
   if (S.unsubA) { S.unsubA(); S.unsubA = null; }
-  S.id = id; S.A = null; S.Aprev = null; S.confirmDel = false; S.actuals = [];
+  S.id = id; S.A = null; S.Aprev = null; S.calculating = false; S.editSeq = (S.editSeq || 0) + 1; S.confirmDel = false; S.actuals = [];
   const l = S.list.find(x => x.id === id);
   S.loadError = ''; S.conflict = null;
-  try { S.P = l && l.data ? migrate(JSON.parse(JSON.stringify(l.data))) : null; S.baseP = S.P ? JSON.parse(JSON.stringify(S.P)) : null; }
+  S.repaired = null; S.deletedNotice = null; S.calcError = null; S.showDeleted = false;
+  try { S.P = l && l.data ? migrate(JSON.parse(JSON.stringify(l.data))) : null; S.baseP = S.P ? JSON.parse(JSON.stringify(S.P)) : null; if (S.P && S.P._repaired) S.repaired = S.P._repaired; }
   catch (e) { S.P = null; S.loadError = `“${(l && l.name) || 'This project'}” couldn’t be opened because its saved data is damaged. Pick another project, or restore it from the backups folder on the server.`; }
   S.rev = l ? l.rev : null;
   try { localStorage.setItem('tee.last', id); } catch (e) { }
@@ -172,7 +239,7 @@ async function createProject(fromExample) {
     try { await S.db.doc('projects/' + id).set(doc); }
     catch (e) { S.saving = e.code === 'invalid_argument' ? 'You have view access only, so new projects can’t be saved' : 'Couldn’t create the project'; renderHeader(); return; }
   }
-  if (!S.list.find(x => x.id === id)) S.list.unshift({ id, ...doc });
+  if (!S.list.find(x => x.id === id)) { S.list.unshift({ id, ...doc }); S.all.unshift(S.list[0]); }
   S.tab = 'summary';
   openProject(id);
 }
@@ -182,21 +249,38 @@ async function duplicateProject() {
   const id = 'p' + Date.now().toString(36) + E.uid().slice(0, 4);
   const doc = { name: P.name, client: P.client || '', updatedAt: Date.now(), rev: E.uid(), data: P };
   if (S.db && !S.local) { try { await S.db.doc('projects/' + id).set(doc); } catch (e) { return; } }
-  if (!S.list.find(x => x.id === id)) S.list.unshift({ id, ...doc });
+  if (!S.list.find(x => x.id === id)) { S.list.unshift({ id, ...doc }); S.all.unshift(S.list[0]); }
   openProject(id);
 }
+// Deletes are marks (deletedAt), so they can be undone; the server refuses saves to deleted projects.
 async function deleteProject() {
-  const id = S.id;
+  const id = S.id, name = S.P ? S.P.name : '';
   if (S.db && !S.local) {
-    try {
-      for (const a of S.actuals) await S.db.doc('projects/' + id + '/actuals/' + a.id).delete();
-      await S.db.doc('projects/' + id).delete();
-    } catch (e) { S.saving = 'Couldn’t delete'; renderHeader(); return; }
+    try { await S.db.doc('projects/' + id).update({ deletedAt: Date.now(), deletedBy: S.me || '' }); }
+    catch (e) { S.saving = 'Couldn’t delete' + (e.message ? ': ' + e.message : ''); renderHeader(); return; }
   }
-  S.list = S.list.filter(x => x.id !== id);
+  const l = S.all.find(x => x.id === id); if (l) { l.deletedAt = Date.now(); l.deletedBy = S.me || ''; }
+  S.list = S.all.filter(x => !x.deletedAt);
   S.id = null; S.P = null;
+  toast(`Deleted “${name}”.`, { act: 'restore-project', id });
   if (S.list.length) openProject(S.list[0].id); else renderAll();
 }
+async function restoreProject(id) {
+  if (S.db && !S.local) { try { await S.db.doc('projects/' + id).update({ deletedAt: null, deletedBy: null }); } catch (e) { toast('Couldn’t restore: ' + (e.message || e.code)); return; } }
+  const l = S.all.find(x => x.id === id); if (l) l.deletedAt = null;
+  S.list = S.all.filter(x => !x.deletedAt);
+  S.showDeleted = false; toast('Restored.');
+  openProject(id);
+}
+function toast(text, undo) { S.toast = { text, undo }; clearTimeout(S.toastTimer); S.toastTimer = setTimeout(() => { S.toast = null; renderToast(); }, 15000); renderToast(); }
+function renderToast() {
+  let el = document.getElementById('toast');
+  if (!el) { el = document.createElement('div'); el.id = 'toast'; el.setAttribute('role', 'status'); document.body.appendChild(el); }
+  const t = S.toast;
+  el.hidden = !t;
+  el.innerHTML = t ? `<span>${esc(t.text)}</span>${t.undo ? `<button class="btn" data-act="${t.undo.act}" data-id="${esc(t.undo.id || '')}">Undo</button>` : ''}<button class="btn ghost" data-act="toast-close" aria-label="Dismiss">✕</button>` : '';
+}
+function liveActuals() { return S.actuals.filter(a => !a.deletedAt); }
 function deepMerge(t, p) { for (const [k, v] of Object.entries(p)) { if (v && typeof v === 'object' && !Array.isArray(v) && t[k] && typeof t[k] === 'object') deepMerge(t[k], v); else t[k] = v; } return t; }
 async function createActual(row) {
   if (S.db && !S.local) {
@@ -254,7 +338,7 @@ async function patchActual(id, patch, force) {
   deepMerge(r, JSON.parse(JSON.stringify(patch)));
   if (S.db && !S.local) {
     try { await S.db.doc('projects/' + S.id + '/actuals/' + id).update(patch); S.actSeen = S.actSeen || {}; S.actSeen[id] = deepMerge(S.actSeen[id] || {}, JSON.parse(JSON.stringify(patch))); }
-    catch (e) { S.saving = 'Couldn’t save actuals' + (e.message ? ': ' + e.message : ''); renderHeader(); }
+    catch (e) { if (e.code === 'deleted') { S.deletedNotice = { by: e.deletedBy, at: e.deletedAt }; renderAll(); return; } S.saving = 'Couldn’t save actuals' + (e.message ? ': ' + e.message : ''); renderHeader(); }
   } else { S.localActuals = S.localActuals || {}; S.localActuals[S.id] = S.actuals; }
   renderSoon();
 }
@@ -268,6 +352,11 @@ function fieldConflictBanner() {
 }
 function setLeaf(o, path, v) { let x = o; path.slice(0, -1).forEach(k => { x = x[k] = x[k] && typeof x[k] === 'object' ? x[k] : {}; }); x[path[path.length - 1]] = v; return o; }
 async function deleteActual(id) {
+  const r = S.actuals.find(x => x.id === id); if (!r) return;
+  await patchActual(id, { deletedAt: Date.now() }, true);
+  toast(`Removed the week of ${fd(r.week)}.`, { act: 'restore-week', id });
+}
+async function deleteActualHard(id) {
   S.actuals = S.actuals.filter(x => x.id !== id);
   if (S.db && !S.local) { try { await S.db.doc('projects/' + S.id + '/actuals/' + id).delete(); } catch (e) { } }
   renderSoon();
@@ -348,10 +437,11 @@ function startWorker() {
       calcBusy = false;
       const { seq, A, error } = ev.data;
       if (calcAgain) { calcAgain = false; runCalc(); return; }
-      if (error) { worker = null; S.A = null; S.Aprev = null; S.calculating = false; renderAll(); return; }
-      if (seq === S.editSeq && S.P) { S.A = A; S.Aprev = null; S.calculating = false; renderAll(); }
+      if (error) { worker = null; S.A = null; S.Aprev = null; S.calculating = false; flushWaiters(); renderAll(); return; }
+      if (seq === S.editSeq && S.P) { S.A = A; S.Aprev = null; S.calculating = false; flushWaiters(); renderAll(); }
+      else if (S.P) runCalc(); // the plan changed while this ran: go again
     };
-    worker.onerror = () => { worker = null; calcBusy = false; S.Aprev = null; S.calculating = false; renderSoon(); };
+    worker.onerror = () => { worker = null; calcBusy = false; S.Aprev = null; S.calculating = false; flushWaiters(); renderSoon(); };
   } catch (e) { worker = null; }
 }
 function runCalc() {
@@ -360,11 +450,24 @@ function runCalc() {
   calcBusy = true;
   worker.postMessage({ seq: S.editSeq, P: JSON.parse(JSON.stringify(S.P)) });
 }
+// Returns the latest results, or the previous ones (or null on first open) while the worker
+// recalculates. Without a worker it calculates on the spot.
 function analysis() {
   if (S.A) return S.A;
   if (!S.P) return null;
-  if (S.Aprev && worker) { if (!S.calculating) { S.calculating = true; clearTimeout(calcTimer); calcTimer = setTimeout(runCalc, 200); } return S.Aprev; }
+  if (worker) { if (!S.calculating) { S.calculating = true; clearTimeout(calcTimer); calcTimer = setTimeout(runCalc, S.Aprev ? 200 : 0); } return S.Aprev || null; }
   S.A = E.analyse(S.P); return S.A;
+}
+// For anything that sends numbers out: wait for results that match the current plan.
+let calcWaiters = [];
+function flushWaiters() { const w = calcWaiters; calcWaiters = []; w.forEach(f => f()); }
+function freshAsync() {
+  if (S.A && !S.calculating) return Promise.resolve(S.A);
+  if (!worker) return Promise.resolve(fresh());
+  return new Promise(resolve => {
+    calcWaiters.push(() => resolve(S.A || fresh()));
+    S.calculating = true; clearTimeout(calcTimer); runCalc();
+  });
 }
 function fresh() { if (!S.A || S.calculating) { S.A = E.analyse(S.P); S.Aprev = null; S.calculating = false; S.editSeq = (S.editSeq || 0) + 1; } return S.A; }
 
@@ -380,9 +483,10 @@ function renderHeader() {
   $('#save').textContent = S.saving + (S.calculating ? (S.saving ? ' · ' : '') + 'Updating results…' : '');
   const has = !!S.P;
   $('#hdr-actions').innerHTML = `
+    ${S.all.some(x => x.deletedAt) ? `<button class="btn ghost" data-act="show-deleted">Deleted (${S.all.filter(x => x.deletedAt).length})</button>` : ''}
     <button class="btn" data-act="new">New project</button>
     ${has ? `<button class="btn" data-act="dup">Duplicate</button>
-    ${S.confirmDel ? `<span class="confirm">Delete this project and its tracking data? <button class="btn danger" data-act="del-yes">Delete</button><button class="btn" data-act="del-no">Cancel</button></span>` : `<button class="btn" data-act="del">Delete</button>`}
+    ${S.confirmDel ? `<span class="confirm">Delete this project? You can undo or restore it later. <button class="btn danger" data-act="del-yes">Delete</button><button class="btn" data-act="del-no">Cancel</button></span>` : `<button class="btn" data-act="del">Delete</button>`}
     <button class="btn primary" data-act="xlsx" ${S.dl === false ? 'disabled title="Downloads aren’t available in this view"' : ''}>Export Excel</button>` : ''}`;
   document.querySelectorAll('nav.tabs button').forEach(b => b.setAttribute('aria-selected', b.dataset.tab === S.tab));
   $('nav.tabs').hidden = !has;
@@ -402,8 +506,24 @@ function renderMain() {
       </div>`;
     return;
   }
+  if (S.showDeleted) {
+    const del = S.all.filter(x => x.deletedAt).sort((x, y) => y.deletedAt - x.deletedAt);
+    m.innerHTML = `<section class="panel"><div class="panel-head"><h2>Deleted projects</h2><button class="btn" data-act="hide-deleted">Back</button></div>
+      ${del.length ? `<div class="tbl-wrap"><table><thead><tr><th>Project</th><th>Deleted by</th><th>When</th><th></th></tr></thead><tbody>${del.map(x => `<tr><td>${esc(x.name)}</td><td>${esc(x.deletedBy || '—')}</td><td>${new Date(x.deletedAt).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })}</td><td class="r"><button class="btn" data-act="restore-project" data-id="${esc(x.id)}">Restore</button></td></tr>`).join('')}</tbody></table></div>` : '<p class="muted">Nothing deleted.</p>'}
+      <p class="small muted">Restoring brings back the project with all its weekly actuals.</p></section>`;
+    return;
+  }
+  let first = null;
+  try { first = analysis(); S.calcError = null; } catch (e) { S.calcError = (e && e.message) || String(e); }
+  if (!first && !S.calcError) { m.innerHTML = conflictBanner() + deletedBanner() + `<div class="empty"><p class="muted">Working out the estimate…</p></div>`; return; }
+  if (S.calcError) {
+    m.innerHTML = conflictBanner() + deletedBanner() + `<section class="panel"><h2>This project can’t be calculated</h2>
+      <p>Something in its settings is invalid: <span class="muted">${esc(S.calcError)}</span></p>
+      <div class="row"><button class="btn primary" data-act="reset-factors-now">Reset factors to defaults</button><span class="small muted">or pick another project from the list above.</span></div></section>`;
+    return;
+  }
   const tabs = { summary: viewSummary, schedule: viewSchedule, scope: viewScope, team: viewTeam, calendar: viewCalendar, factors: viewFactors, tracking: viewTracking };
-  m.innerHTML = conflictBanner() + (S.local ? `<div class="banner">Saving isn’t available in this view, so changes last only until you close the page.</div>` : '') + (S.tab !== 'summary' && S.tab !== 'tracking' && S.tab !== 'schedule' ? strip() : '') + tabs[S.tab]();
+  m.innerHTML = conflictBanner() + deletedBanner() + (S.repaired ? `<div class="banner" role="status">Some settings in this project were invalid and have been reset to defaults: ${esc(S.repaired.join(', '))}. Check them on the Factors and Scope tabs. <button class="btn ghost" data-act="repaired-ok">OK</button></div>` : '') + (S.local ? `<div class="banner">Saving isn’t available in this view, so changes last only until you close the page.</div>` : '') + (S.tab !== 'summary' && S.tab !== 'tracking' && S.tab !== 'schedule' ? strip() : '') + tabs[S.tab]();
   if (S.tab === 'summary') drawCapChart();
   if (S.tab === 'schedule') { drawGantt(); drawHeat(); }
   if (S.tab === 'tracking') drawBurnChart();
@@ -488,9 +608,10 @@ function summaryModel(A) {
     if (n.extra == null) Object.assign(item, { big: 'Not possible by the target', sub: `More people don’t help enough: framework, reviews, build gaps and module availability set a minimum duration.${n.floor ? ` Even with 256 more people the earliest finish is ${fd(n.floor)}.` : ''}`, text: 'Not possible by adding people' });
     else if (n.extra === 0) Object.assign(item, { big: `${teamTxt} is enough`, sub: A.needWorst && A.needWorst.extra ? `Add ${plural(A.needWorst.extra, 'engineer', 'engineers')} to cover the worst case.` : 'Covers the worst case too.', text: `**${teamTxt}**, the current team is enough` });
     else {
-      const loc = a.hireLocation, tot = fte + n.extra;
+      const loc = a.hireLocation, tot = n.totalFte || fte + n.extra;
+      const joining = (+a.hireLeadDays || 0) > 0 ? `joining after about ${plural(+a.hireLeadDays, 'working day', 'working days')}` : 'from day 1';
       const extras = [n.needLeads ? `+${plural(n.needLeads, 'lead', 'leads')}` : '', n.needMgr ? `+1 manager at ${a.managerAlloc}%` : ''].filter(Boolean);
-      Object.assign(item, { big: `${FTE(tot)} FTE`, sub: `${A.hasTeam ? `+${plural(n.extra, 'engineer', 'engineers')} on top of the current team` : plural(n.extra, 'engineer', 'engineers')}, based in ${esc(loc)}, ${esc(a.hireSkill.toLowerCase())}, full-time from day 1.${A.needWorst && A.needWorst.extra != null && A.needWorst.extra > n.extra ? ` Worst case: +${A.needWorst.extra}.` : ''}`,
+      Object.assign(item, { big: `${FTE(tot)} FTE`, sub: `${A.hasTeam ? `+${plural(n.extra, 'engineer', 'engineers')} on top of the current team` : plural(n.extra, 'engineer', 'engineers')}, based in ${esc(loc)}, ${esc(a.hireSkill.toLowerCase())}, full-time, ${joining}.${A.needWorst && A.needWorst.extra != null && A.needWorst.extra > n.extra ? ` Worst case: +${A.needWorst.extra}.` : ''}`,
         chips: [...n.heads.map(h => `${h.n} × ${h.level}`), ...extras],
         text: `**${FTE(tot)} FTE** (+${plural(n.extra, 'engineer', 'engineers')}, ${loc})${extras.length ? ', plus ' + extras.join(', ').replace(/\+/g, '') : ''}`,
         textClient: `**${FTE(tot)} FTE** (+${plural(n.extra, 'engineer', 'engineers')})` });
@@ -510,7 +631,11 @@ function summaryModel(A) {
   else if (!P.end) M.rec = fl ? `With ${teamTxt}, plan for about ${calDays(P.start, fl)} calendar days (finish ${fd(fl)}). Set a target end date to get a staffing recommendation.` : '';
   else if (A.status === 'ok') M.rec = `The current ${teamTxt} delivers by ${fd(P.end)} with ${bufTxt(buf(fl))}, and even the worst case is on time.`;
   else if (A.status === 'risk') M.rec = `The current ${teamTxt} delivers by ${fd(P.end)} with ${bufTxt(buf(fl))}, but not in the worst case.${A.needWorst && A.needWorst.extra ? ` To cover the worst case, add ${plural(A.needWorst.extra, 'engineer', 'engineers')}` : ' To cover the worst case'}${A.finish.worst.date ? `, or agree a fallback date of ${fd(A.finish.worst.date)}` : ''}.`;
-  else if (A.need && A.need.extra > 0) M.rec = `Staff ${FTE(fte + A.need.extra)} FTE from day 1 to deliver by ${fd(P.end)}, which leaves ${bufTxt(buf(A.need.finish))}.${orElse}`;
+  else if (A.need && A.need.extra > 0) {
+    const lead = (+a.hireLeadDays || 0) > 0 ? `, with the new people starting within ${plural(+a.hireLeadDays, 'working day', 'working days')}` : ' from day 1';
+    const parts = [`+${plural(A.need.extra, 'engineer', 'engineers')}`, A.need.needLeads ? `+${plural(A.need.needLeads, 'lead', 'leads')}` : '', A.need.needMgr ? `a manager at ${a.managerAlloc}%` : ''].filter(Boolean).join(', ');
+    M.rec = `Staff ${FTE(A.need.totalFte || fte + A.need.extra)} FTE (${parts})${lead}, to deliver by ${fd(P.end)} with ${bufTxt(buf(A.need.finish))}.${orElse}`;
+  }
   else if (A.need && A.need.extra == null) M.rec = `Adding people won’t bring this in by ${fd(P.end)}.${orElse || ' Move the target date or cut scope.'}`;
   else M.rec = '';
 
@@ -624,7 +749,7 @@ function summaryMarkdown(A, aud) {
 }
 
 async function copySummary() {
-  const text = summaryMarkdown(fresh(), S.sumAud || 'client');
+  const text = summaryMarkdown(await freshAsync(), S.sumAud || 'client');
   try {
     if (!navigator.clipboard || !navigator.clipboard.writeText) throw new Error('no clipboard');
     await navigator.clipboard.writeText(text);
@@ -752,7 +877,7 @@ function viewScope() {
       <td>${inp(`modules.${i}.autoPct`, 'num', 'w-s', 'min="0" max="100"')}</td>
       <td>${sel(`modules.${i}.testData`, a.testData.map(x => x.key))}</td>
       <td class="r num">${H(em.manual + em.auto)}</td>
-      <td><button class="btn ghost" data-act="rm-mod" data-i="${i}" aria-label="Remove module">Remove</button></td></tr>`;
+      <td>${S.confirmRm === 'mod:' + i ? `<span class="confirm">Remove? <button class="btn danger" data-act="rm-mod" data-i="${i}">Yes</button><button class="btn" data-act="rm-no">No</button></span>` : `<button class="btn ghost" data-act="rm-mod-ask" data-i="${i}" aria-label="Remove module">Remove</button>`}</td></tr>`;
   }).join('');
   return `<section class="panel">
     <div class="panel-head"><h2>Modules and test cases</h2><button class="btn" data-act="add-mod">Add module</button></div>
@@ -790,7 +915,7 @@ function viewTeam() {
       <td>${inp(`team.${i}.end`, 'date')}</td>
       <td><button class="btn" data-act="tog-leave" data-id="${r.id}" aria-expanded="${!!open}">${lv ? lv + ' leave' + (lv > 1 ? 's' : '') : 'Add leave'}</button></td>
       <td class="r num">${w ? H(w.per[i]) : '—'}</td>
-      <td><button class="btn ghost" data-act="rm-res" data-i="${i}" aria-label="Remove person">Remove</button></td></tr>${leaveRow}`;
+      <td>${S.confirmRm === 'res:' + i ? `<span class="confirm">Remove? <button class="btn danger" data-act="rm-res" data-i="${i}">Yes</button><button class="btn" data-act="rm-no">No</button></span>` : `<button class="btn ghost" data-act="rm-res-ask" data-i="${i}" aria-label="Remove person">Remove</button>`}</td></tr>${leaveRow}`;
   }).join('');
   return `<section class="panel">
     <div class="panel-head"><h2>Team</h2><button class="btn" data-act="add-res">Add person</button></div>
@@ -964,7 +1089,7 @@ function baselinePanel(A) {
 }
 
 function viewTracking() {
-  const P = S.P, A = analysis(), T = E.tracking(P, S.actuals, A.sched);
+  const P = S.P, A = analysis(), T = E.tracking(P, liveActuals(), A.sched);
   S.T = T;
   const weeks = T.rows.map(r => r.week);
   if (!weeks.includes(S.trWeek)) S.trWeek = weeks[weeks.length - 1] || null;
@@ -982,9 +1107,9 @@ function viewTracking() {
     const sp = r.plannedPct > 0 ? r.pct / r.plannedPct : null, st = sp == null ? null : sp >= 0.97 ? 'ok' : sp >= 0.85 ? 'risk' : 'no';
     return `<tr class="${r.week === S.trWeek ? 'sel' : ''}"><td>${fd(r.week)}</td><td class="r num">${n0(r.designed)}</td><td class="r num">${n0(r.automated)}</td><td class="r num">${n0(r.executed)}</td><td class="r num">${n0(E.hoursOf(r))}</td>
       <td class="r num">${pct(r.pct)}</td><td class="r num">${r.plannedPct == null ? '—' : pct(r.plannedPct)}</td><td>${st ? pill(st, ST_LABEL[st]) : ''}</td>
-      <td class="r"><button class="btn" data-act="tr-edit" data-id="${r.id}">${r.week === S.trWeek ? 'Editing' : 'Edit'}</button> <button class="btn ghost" data-act="rm-ac" data-id="${r.id}">Remove</button></td></tr>`;
+      <td class="r"><button class="btn" data-act="tr-edit" data-id="${r.id}">${r.week === S.trWeek ? 'Editing' : 'Edit'}</button> ${S.confirmRm === 'ac:' + r.id ? `<span class="confirm">Remove this week? <button class="btn danger" data-act="rm-ac" data-id="${r.id}">Yes</button><button class="btn" data-act="rm-no">No</button></span>` : `<button class="btn ghost" data-act="rm-ac-ask" data-id="${r.id}">Remove</button>`}</td></tr>`;
   }).join('');
-  const R = S.trWeek ? E.weekReport(P, S.actuals, A.sched, S.trWeek) : null;
+  const R = S.trWeek ? E.weekReport(P, liveActuals(), A.sched, S.trWeek) : null;
   return `${baselinePanel(A)}
   <section class="panel">
     <div class="panel-head"><h2>Weekly actuals</h2><button class="btn primary" data-act="add-week">Log next week</button></div>
@@ -999,7 +1124,7 @@ function viewTracking() {
 }
 
 function weekEditor(R) {
-  const r = S.actuals.find(x => x.week === R.week); if (!r) return '';
+  const r = liveActuals().find(x => x.week === R.week); if (!r) return '';
   const mods = r.mods || {};
   const cell = (m, k) => {
     const [key, , pk, scopeK] = k;
@@ -1028,6 +1153,7 @@ function weekEditor(R) {
     ${otRows ? `<div><h3>Setup and framework progress</h3><p class="small muted">Percent complete to date. Leave blank to carry over last week’s figure.</p><div class="fields" style="margin-top:8px">${otRows}</div></div>` : ''}
     <div><h3>Hours logged</h3><p class="small muted">Each person’s timesheet hours for the week. Used for productivity (earned hours per logged hour). Total: <b class="num">${n0(E.hoursOf(r))} h</b>.</p>
       <div class="fields" style="margin-top:8px">${S.P.team.map(p => `<label class="field"><span class="lbl">${esc(p.name)}</span><input type="number" min="0" max="200" step="any" id="ac-${r.id}-h-${p.id}" data-ac="${r.id}" data-hp="${p.id}" value="${r.hoursBy && r.hoursBy[p.id] != null ? r.hoursBy[p.id] : ''}" placeholder="0"></label>`).join('')}
+      ${Object.keys(r.hoursBy || {}).filter(pid => !S.P.team.some(p => p.id === pid)).map(pid => `<label class="field"><span class="lbl">Former team member</span><input type="number" min="0" max="200" step="any" id="ac-${r.id}-h-${pid}" data-ac="${r.id}" data-hp="${pid}" value="${r.hoursBy[pid]}"><span class="hint">No longer on the team; hours still count</span></label>`).join('')}
       ${!(r.hoursBy && Object.keys(r.hoursBy).length) && +r.hours > 0 ? `<label class="field"><span class="lbl">Earlier total (not split)</span><input type="number" min="0" step="any" id="ac-${r.id}-hours" data-ac="${r.id}" data-k="hours" value="${+r.hours || 0}"><span class="hint">Replaced once you enter hours per person</span></label>` : ''}</div></div>
     <div class="grid2">
       <label class="field"><span class="lbl">Highlights this week</span><textarea rows="4" id="ac-${r.id}-notes" data-ac="${r.id}" data-k="notes" placeholder="One per line, e.g. Login and payments flows automated">${esc(r.notes || '')}</textarea></label>
@@ -1075,7 +1201,7 @@ function mailModel(R, aud) {
   let base = '';
   if (R.targetChanged) base += `The target date has moved from ${fd(R.targetChanged.from)} to ${R.targetChanged.to ? fd(R.targetChanged.to) : 'none'} since the baseline; we still report against ${fd(R.targetChanged.from)} until the baseline is updated. `;
   if (R.baseline) {
-    base = `Measured against the baseline agreed on ${fd(R.baseline.at)}.`;
+    base += `Measured against the baseline agreed on ${fd(R.baseline.at)}.`;
     const h = R.history; if (h.length > 1) base += ` Re-baselined on ${fd(h[h.length - 1].at)}${h[h.length - 1].reason ? ': ' + h[h.length - 1].reason : ''}.`;
   }
   const inScope = KINDS.filter(([, , , sk]) => R.mods.some(m => m[sk] > 0));
@@ -1088,6 +1214,7 @@ function mailModel(R, aud) {
   R.ot.forEach(o => { if (o.done != null && o.done + 15 < o.planned) risks.push(`<b>${OT_LABEL[o.key]}</b> is behind: ${Math.round(o.done)}% done against ${Math.round(o.planned)}% planned.`); });
   if (R.late > 0) risks.push(`At the current pace the finish moves to ${fd(R.forecast)}, ${plural(R.late, 'day', 'days')} after the target.`);
   if (internal && R.effIndex != null && R.effIndex < 0.85) risks.push(`Productivity is ${R.eff.toFixed(2)} earned hours per logged hour, against about ${R.effPlan.toFixed(2)} in the plan.`);
+  if (R.drift && R.drift.days > 0) risks.push(`Since the baseline the plan has changed and now finishes ${fd(R.drift.liveFinish)}, ${plural(R.drift.days, 'day', 'days')} later${target && R.drift.liveFinish > target ? `, after the ${fd(target)} target` : ''}. This needs a change request or a re-baseline.`);
   if (R.outside.some(o => o.act.designed + o.act.automated + o.act.executed > 0)) risks.push(`Work is being done on modules outside the agreed baseline (listed below). It isn’t counted as progress until a change request is agreed.`);
   if (internal) R.warnings.forEach(w => risks.push(esc(w)));
   lines(R.row.blockers).forEach(x => risks.push(esc(x)));
@@ -1111,7 +1238,8 @@ function mailModel(R, aud) {
   });
   if (leave.length) nx.push(internal ? `On leave: ${leave.map(([n, d]) => `${esc(n)} (${plural(d, 'day', 'days')})`).join(', ')}.` : `Planned leave: ${plural(leave.reduce((t, x) => t + x[1], 0), 'person-day', 'person-days')}.`);
   const outside = R.outside.filter(o => o.act.designed + o.act.automated + o.act.executed > 0).map(o => `<b>${esc(o.name)}</b>: ${[['designed', 'designed'], ['automated', 'automated'], ['executed', 'manual executions']].filter(([k]) => o.act[k] > 0).map(([k, l]) => `${n0(o.act[k])} ${l}`).join(', ')} so far.`);
-  return { title, subject, label, reason, base, outside, inScope, scopeTot, risks, next: nx, highlights: lines(R.row.notes).map(esc), confirm: M.confirm.map(esc), internal, fte: M.fte };
+  const changes = R.changes.map(esc).concat(R.drift ? [`The current plan finishes ${fd(R.drift.liveFinish)}, ${plural(Math.abs(R.drift.days), 'day', 'days')} ${R.drift.days > 0 ? 'later' : 'earlier'} than the baseline.`] : []);
+  return { title, subject, label, reason, base, outside, changes, inScope, scopeTot, risks, next: nx, highlights: lines(R.row.notes).map(esc), confirm: M.confirm.map(esc), internal, fte: M.fte };
 }
 
 function mailHTML(R, aud) {
@@ -1130,6 +1258,7 @@ function mailHTML(R, aud) {
     b.push(mt(['Module', ...X.inScope.map(k => k[1].replace('Test cases ', '').replace(/^./, c => c.toUpperCase())), 'Done', 'Status'],
       R.mods.map(m => [esc(m.name), ...X.inScope.map(([key, , , sk]) => m[sk] > 0 ? `${n0(Math.min(m.act[key], m[sk]))} of ${n0(m[sk])}` : '—'), pct(m.pctDone), m.status === 'notstarted' ? 'Not started' : `<span style="color:${MAIL_COL[ST_PILL[m.status] === 'ok' ? 'ok' : m.status] || '#444'}">■</span> ${ST_LABEL[m.status]}`]), [X.inScope.length + 1]));
   }
+  if (X.changes.length) { b.push(mh('Changes since the baseline')); b.push(mul(X.changes)); }
   if (X.outside.length) { b.push(mh('Work outside the agreed baseline (pending a change request)')); b.push(mul(X.outside)); }
   if (X.highlights.length) { b.push(mh('Highlights')); b.push(mul(X.highlights)); }
   b.push(mh('Risks and blockers'));
@@ -1190,7 +1319,7 @@ document.addEventListener('input', ev => {
 function flashMail(t) { S.mailNote = t; renderAll(); clearTimeout(S.mailTimer); S.mailTimer = setTimeout(() => { S.mailNote = ''; if (S.tab === 'tracking') renderAll(); }, 3500); }
 function selectNode(el) { const r = document.createRange(); r.selectNodeContents(el); const s = window.getSelection(); s.removeAllRanges(); s.addRange(r); }
 async function copyMail(plain) {
-  if (S.calculating) { fresh(); renderAll(); }
+  if (S.calculating || !S.A) { await freshAsync(); renderAll(); }
   const el = $('#mail-preview'); if (!el) return;
   if (el.closest('#mail-panel').querySelector('[data-act=mail-copy][disabled]')) return;
   const html = el.innerHTML, text = el.innerText;
@@ -1287,6 +1416,7 @@ function lineChart(el, { series, refY, refX = [], yMax, yFmt, xDomain }) {
   svg.addEventListener('pointerleave', () => { tip.hidden = true; xh.setAttribute('visibility', 'hidden'); });
 }
 function drawCapChart() {
+  if (!analysis()) return;
   const P = S.P, A = analysis(), el = $('#cap-chart');
   if (!A.hasTeam || !P.start) { el.innerHTML = '<p class="small muted">Add team members to see capacity build up over time.</p>'; return; }
   const fin = A.finish && A.finish.likely.date;
@@ -1380,6 +1510,7 @@ function weekDomain(A) {
 }
 
 function drawGantt() {
+  if (!analysis()) return;
   const el = $('#gantt'); if (!el) return;
   const P = S.P, A = analysis(), sc = A.sched, { w0, nW } = weekDomain(A);
   const labelW = 210, rowH = 22, headH = 40;
@@ -1442,6 +1573,7 @@ function drawGantt() {
 }
 
 function drawHeat() {
+  if (!analysis()) return;
   const el = $('#heat'); if (!el) return;
   const P = S.P, A = analysis(), sc = A.sched, { w0, nW } = weekDomain(A);
   const labelW = 210, rowH = 34, headH = 24, rightW = 60;
@@ -1576,6 +1708,33 @@ document.addEventListener('click', ev => {
     case 'del': S.confirmDel = true; renderHeader(); break;
     case 'del-no': S.confirmDel = false; renderHeader(); break;
     case 'del-yes': S.confirmDel = false; deleteProject(); break;
+    case 'show-deleted': S.showDeleted = true; renderAll(); break;
+    case 'hide-deleted': S.showDeleted = false; renderAll(); break;
+    case 'restore-project': S.toast = null; renderToast(); restoreProject(b.dataset.id); break;
+    case 'restore-week': S.toast = null; renderToast(); patchActual(b.dataset.id, { deletedAt: null }, true); break;
+    case 'toast-close': S.toast = null; renderToast(); break;
+    case 'repaired-ok': S.repaired = null; renderAll(); break;
+    case 'reset-factors-now': S.calcError = null; mut(() => { P.a = E.defaults(); }); break;
+    case 'restore-mine': {
+      S.deletedNotice = null; S.saving = 'Saving…'; renderHeader();
+      const ref = S.db.doc('projects/' + S.id);
+      (async () => {
+        try {
+          if (!S.db.selfHosted) await ref.update({ deletedAt: null, deletedBy: null });
+          await writePlan(ref, 'Restored and saved', true);
+          const l = S.all.find(x => x.id === S.id); if (l) l.deletedAt = null;
+          S.list = S.all.filter(x => !x.deletedAt);
+        } catch (e) { S.saving = 'Couldn’t restore: ' + (e.message || e.code); }
+        S.pendingRev = null; renderAll();
+      })();
+      break;
+    }
+    case 'leave-deleted': { const gone = S.id; S.deletedNotice = null; S.P = null; S.id = null; S.list = S.all.filter(x => !x.deletedAt && x.id !== gone); if (S.list.length) openProject(S.list[0].id); else renderAll(); break; }
+    case 'rm-mod-ask': S.confirmRm = 'mod:' + i; renderAll(); break;
+    case 'rm-res-ask': S.confirmRm = 'res:' + i; renderAll(); break;
+    case 'rm-ac-ask': S.confirmRm = 'ac:' + b.dataset.id; renderAll(); break;
+    case 'rm-no': S.confirmRm = null; renderAll(); break;
+    case 'restore-row': { const u = S.undoRow; if (!u) break; S.undoRow = null; S.toast = null; renderToast(); mut(() => { P[u.coll].splice(Math.min(u.index, P[u.coll].length), 0, u.item); }); break; }
     case 'xlsx': exportXlsx(); break;
     case 'conflict-use-theirs': resolveConflict(false); break;
     case 'fc-theirs': case 'fc-mine': case 'fc-both': {
@@ -1593,9 +1752,9 @@ document.addEventListener('click', ev => {
     case 'sum-aud': S.sumAud = b.dataset.k; renderAll(); break;
     case 'copy-close': S.copyFallback = null; renderAll(); break;
     case 'add-mod': mut(() => P.modules.push(E.newModule('Module ' + (P.modules.length + 1), P.modules.length + 1))); break;
-    case 'rm-mod': mut(() => P.modules.splice(i, 1)); break;
+    case 'rm-mod': { S.confirmRm = null; const item = P.modules[i]; mut(() => P.modules.splice(i, 1)); S.undoRow = { coll: 'modules', index: i, item }; toast(`Removed module “${item.name}”.`, { act: 'restore-row' }); break; }
     case 'add-res': mut(() => { const r = E.newResource(P.team.length + 1); r.location = P.locations[0]; P.team.push(r); }); break;
-    case 'rm-res': mut(() => P.team.splice(i, 1)); break;
+    case 'rm-res': { S.confirmRm = null; const item = P.team[i]; mut(() => P.team.splice(i, 1)); S.undoRow = { coll: 'team', index: i, item }; toast(`Removed “${item.name}” from the team.`, { act: 'restore-row' }); break; }
     case 'tog-leave': S.openLeaves[b.dataset.id] = !S.openLeaves[b.dataset.id]; renderAll(); break;
     case 'add-leave': mut(() => P.team[i].leaves.push({ from: P.start, to: P.start, note: '' })); break;
     case 'rm-leave': mut(() => P.team[i].leaves.splice(+b.dataset.j, 1)); break;
@@ -1605,7 +1764,12 @@ document.addEventListener('click', ev => {
       const loc = $('#hol-loc').value, lines = ($('#hol-paste').value || '').split('\n').map(x => x.trim()).filter(Boolean);
       let added = 0, bad = 0, dup = 0;
       lines.forEach(line => {
-        const parts = line.split(/\t|,|;/).map(x => x.trim());
+        let parts = line.split(/\t|,|;/).map(x => x.trim());
+        // the name may itself contain commas: date first, location last (if it's a known location), name in between
+        if (parts.length > 3 || (parts.length === 3 && !P.locations.includes(parts[2]))) {
+          const lastIsLoc = P.locations.includes(parts[parts.length - 1]);
+          parts = [parts[0], parts.slice(1, lastIsLoc ? -1 : undefined).join(', '), lastIsLoc ? parts[parts.length - 1] : ''];
+        }
         let d = parts[0] || '';
         const m1 = d.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/), m2 = d.match(/^(\d{1,2})[\/.-](\d{1,2})[\/.-](\d{4})$/);
         const mdy = ($('#hol-order') || {}).value === 'mdy';
@@ -1637,13 +1801,14 @@ document.addEventListener('click', ev => {
     case 'reset-no': S.confirmReset = false; renderAll(); break;
     case 'reset-yes': S.confirmReset = false; mut(() => { P.a = E.defaults(); }); break;
     case 'add-week': {
-      const weeks = S.actuals.map(x => x.week).sort();
+      const weeks = liveActuals().map(x => x.week).sort();
       const wk = weeks.length ? E.addDays(weeks[weeks.length - 1], 7) : E.mondayOf(P.start);
+      if (wk > E.mondayOf(E.toS(Date.now()))) { toast(`The week of ${fd(wk)} hasn’t started yet.`); break; }
       S.trWeek = wk;
       createActual({ id: wk, week: wk, notes: '', blockers: '', mods: {}, ot: {}, hoursBy: {} });
       break;
     }
-    case 'rm-ac': deleteActual(b.dataset.id); break;
+    case 'rm-ac': S.confirmRm = null; deleteActual(b.dataset.id); break;
     case 'tr-edit': S.trWeek = (S.actuals.find(x => x.id === b.dataset.id) || {}).week; renderAll(); break;
     case 'mail-aud': S.mailAud = b.dataset.k; renderAll(); break;
     case 'mail-copy': copyMail(false); break;
@@ -1656,12 +1821,14 @@ document.addEventListener('click', ev => {
     case 'baseline-freeze': {
       const reason = ($('#baseline-reason') || {}).value || '';
       if (P.baseline && !reason.trim()) { S.baselineNote = 'Give a reason for re-baselining. It goes into the status emails.'; renderAll(); break; }
-      const A = fresh();
-      if (!A.sched || !A.sched.finish) break;
-      const b = E.makeBaseline(P, A.sched, reason.trim());
-      P.baselineHistory = (P.baselineHistory || []).concat([{ at: b.at, reason: b.reason, finish: b.finish, total: b.total, tcs: b.tcs, autoTCs: b.autoTCs }]);
-      P.baseline = b; S.rebaseline = false; S.baselineNote = '';
-      touch(); break;
+      freshAsync().then(A => {
+        if (!A.sched || !A.sched.finish) return;
+        const b = E.makeBaseline(P, A.sched, reason.trim());
+        P.baselineHistory = (P.baselineHistory || []).concat([{ at: b.at, reason: b.reason, finish: b.finish, total: b.total, tcs: b.tcs, autoTCs: b.autoTCs }]);
+        P.baseline = b; S.rebaseline = false; S.baselineNote = '';
+        touch();
+      });
+      break;
     }
   }
 });
@@ -1674,7 +1841,7 @@ document.addEventListener('change', ev => {
 
 /* ---------- Excel export ---------- */
 async function exportXlsx() {
-  const P = S.P, A = fresh(), e = A.e, a = P.a;
+  const P = S.P, A = await freshAsync(), e = A.e, a = P.a;
   if (typeof XLSX === 'undefined') { S.saving = 'Excel library didn’t load'; renderHeader(); return; }
   if (!S.dl) { S.saving = 'Downloads aren’t available in this view'; renderHeader(); return; }
   const wb = XLSX.utils.book_new();
@@ -1725,7 +1892,7 @@ async function exportXlsx() {
       ...P.team.flatMap((r, k) => Object.entries(sc.people[k].weeks).sort((x, y) => +x[0] - +y[0]).map(([w, v]) => [r.name, E.addDays(sc.weekStart, +w * 7), ...CAT_ORDER.map(c => r1(v.cats[c] || 0)), r1(v.idle), v.off]))], [24, 12]);
   }
   add('Calendar', [['Date', 'Holiday', 'Location'], ...P.holidays.slice().sort((x, y) => x.date < y.date ? -1 : 1).map(h => [h.date, h.name, h.location]), [], ['Blocked from', 'To', 'Impact %', 'Reason'], ...P.downtimes.map(d => [d.from, d.to, d.impact, d.reason])], [14, 30, 12, 30]);
-  if (S.actuals.length) { const T = E.tracking(P, S.actuals, A.sched); add('Actuals', [['Week starting', 'Designed', 'Manual executions', 'Automated', 'Hours logged', 'Highlights', 'Blockers', 'Done %', 'Planned %'], ...T.rows.map(r => [r.week, r.designed, r.executed, r.automated, r.hours, r.notes || '', r.blockers || '', r1(r.pct * 100), r.plannedPct == null ? '' : r1(r.plannedPct * 100)])], [14, 10, 16, 10, 12, 30, 30, 10, 10]);
+  if (liveActuals().length) { const T = E.tracking(P, liveActuals(), A.sched); add('Actuals', [['Week starting', 'Designed', 'Manual executions', 'Automated', 'Hours logged', 'Highlights', 'Blockers', 'Done %', 'Planned %'], ...T.rows.map(r => [r.week, r.designed, r.executed, r.automated, r.hours, r.notes || '', r.blockers || '', r1(r.pct * 100), r.plannedPct == null ? '' : r1(r.plannedPct * 100)])], [14, 10, 16, 10, 12, 30, 30, 10, 10]);
     const mn = id => id === '_all' ? 'Not split by module' : ((P.modules.find(m => m.id === id) || {}).name || id);
     add('Actuals by module', [['Week starting', 'Module', 'Designed', 'Automated', 'Manual executions'], ...T.rows.flatMap(r => Object.entries(r.mods || {}).map(([id, v]) => [r.week, mn(id), +v.designed || 0, +v.automated || 0, +v.executed || 0]))], [14, 28, 10, 10, 16]); }
   const buf = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
@@ -1745,16 +1912,18 @@ async function exportXlsx() {
     claude ? claude.use('downloads').catch(() => null) : null
   ]);
   S.dl = dl || false; S.db = db;
+  if (db && db.selfHosted) { try { const r = await fetch('/api/me'); if (r.ok) S.me = (await r.json()).user; } catch (e) { } }
   if (!db) {
     S.local = true; S.loading = false;
     const P = exampleProject(); const id = 'local';
-    S.list = [{ id, name: P.name, client: P.client, data: P }];
+    S.list = [{ id, name: P.name, client: P.client, data: P }]; S.all = S.list.slice();
     openProject(id); return;
   }
   let first = true;
   const timer = setTimeout(() => { if (first) { S.loading = false; S.timeoutNote = 'Saved projects can’t be reached yet. They’ll appear here when the connection returns.'; renderAll(); } }, 10000);
   db.collection('projects').orderBy('updatedAt', 'desc').onSnapshot(snap => {
-    S.list = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    S.all = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    S.list = S.all.filter(x => !x.deletedAt);
     if (!snap.metadata.fromCache) { clearTimeout(timer); S.timeoutNote = ''; }
     S.loading = false;
     if (first) {
@@ -1766,11 +1935,16 @@ async function exportXlsx() {
     }
     if (S.id) {
       const cur = S.list.find(x => x.id === S.id);
-      if (!cur) { S.P = null; S.id = null; if (S.list.length) openProject(S.list[0].id); else renderAll(); return; }
+      if (!cur) {
+        const gone = S.all.find(x => x.id === S.id);
+        if (gone && gone.deletedAt && (S.deletedNotice || S.saving === 'Unsaved' || S.saving === 'Saving…' || S.saving === 'Not saved')) { S.deletedNotice = S.deletedNotice || { by: gone.deletedBy, at: gone.deletedAt }; clearTimeout(saveTimer); renderAll(); return; }
+        if (gone && gone.deletedAt) toast(`${gone.deletedBy || 'A colleague'} deleted “${gone.name}”.`, { act: 'restore-project', id: gone.id });
+        S.P = null; S.id = null; if (S.list.length) openProject(S.list[0].id); else renderAll(); return;
+      }
       if (cur.rev && cur.rev !== S.rev && cur.rev !== S.pendingRev && !S.conflict) {
         if (S.saving === 'Unsaved' || S.saving === 'Saving…') { clearTimeout(saveTimer); mergeWith(cur); return; } // both edited: merge now
         // someone else saved and we have no unsaved edits: take theirs
-        try { S.P = migrate(JSON.parse(JSON.stringify(cur.data))); S.baseP = JSON.parse(JSON.stringify(S.P)); S.rev = cur.rev; S.A = null; S.Aprev = null; } catch (e) { S.loadError = 'The latest version of this project is damaged and couldn’t be opened.'; S.P = null; }
+        try { S.P = migrate(JSON.parse(JSON.stringify(cur.data))); S.baseP = JSON.parse(JSON.stringify(S.P)); S.rev = cur.rev; S.Aprev = S.A || S.Aprev; S.A = null; S.calculating = false; S.editSeq = (S.editSeq || 0) + 1; } catch (e) { S.loadError = 'The latest version of this project is damaged and couldn’t be opened.'; S.P = null; }
         renderAll(); return;
       }
     }

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /*
  * Test Effort Estimator - self-hosted server
- * No dependencies: needs Node.js 18 or later.
+ * No packages to install: needs Node.js 22.13 or later (or 24), for its built-in SQLite.
  *
  * Environment variables (all optional):
  *   PORT        Port to listen on (default 3000)
@@ -9,10 +9,15 @@
  *               Set HOST=0.0.0.0 to share on your network; a login is then required.
  *   BASIC_AUTH  Logins as "user:password" or "alice:pw1,bob:pw2"
  *   USERS_FILE  Path to a JSON file of logins: { "alice": "pw1", "bob": "pw2" }
- *   DATA_DIR    Folder for saved data (default ./data)
+ *   DATA_DIR    Folder for the database and audit log (default ./data)
+ *   BACKUP_DIR  Folder for backups (default DATA_DIR/backups); put it on another disk
+ *   TLS_CERT, TLS_KEY   PEM certificate and key files to serve HTTPS
+ *   TLS_PFX, TLS_PASSPHRASE   or a .pfx/.p12 file (common on Windows) and its password
  */
 'use strict';
 const http = require('http');
+const https = require('https');
+const Store = require('./lib/store');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
@@ -20,8 +25,8 @@ const crypto = require('crypto');
 const PORT = +process.env.PORT || 3000;
 const HOST = process.env.HOST || '127.0.0.1';
 const DATA_DIR = path.resolve(process.env.DATA_DIR || path.join(__dirname, 'data'));
-const DB_FILE = path.join(DATA_DIR, 'db.json');
 const AUDIT_FILE = path.join(DATA_DIR, 'audit.log');
+const BACKUP_DIR = path.resolve(process.env.BACKUP_DIR || path.join(DATA_DIR, 'backups'));
 const PUBLIC = path.join(__dirname, 'public');
 const MAX_BODY = 5 * 1024 * 1024;
 
@@ -40,6 +45,10 @@ if (!LOOPBACK && !AUTH_ON) {
   console.error(`Refusing to listen on ${HOST} without a login. Set BASIC_AUTH=user:password (or USERS_FILE), or use HOST=127.0.0.1 for this machine only.`);
   process.exit(1);
 }
+// Slow down password guessing: 10 failed logins from one address locks it out for 15 minutes.
+const FAILS = new Map();
+function throttled(ip) { const f = FAILS.get(ip); return f && f.n >= 10 && Date.now() - f.t < 15 * 60 * 1000; }
+function failed(ip) { const f = FAILS.get(ip); if (!f || Date.now() - f.t > 15 * 60 * 1000) FAILS.set(ip, { n: 1, t: Date.now() }); else f.n++; }
 function whoIs(req) {
   if (!AUTH_ON) return 'local';
   const h = req.headers.authorization || '';
@@ -52,44 +61,24 @@ function whoIs(req) {
   return pw.length === want.length && crypto.timingSafeEqual(pw, want) ? user : null;
 }
 
-/* ---------- storage: one JSON file, map of document path -> body ---------- */
+/* ---------- storage ---------- */
 fs.mkdirSync(DATA_DIR, { recursive: true });
-let db = {};
-try { db = JSON.parse(fs.readFileSync(DB_FILE, 'utf8')); } catch (e) {
-  if (e.code !== 'ENOENT') { console.error('Could not read ' + DB_FILE + ': ' + e.message); process.exit(1); }
-}
-let version = 1; // bumps on every write; drives ETags for polling
-let writing = false, pending = false;
-function persist() { version++; writeSoon(); }
-function writeSoon() {
-  if (writing) { pending = true; return; }
-  writing = true;
-  const tmp = DB_FILE + '.tmp';
-  fs.writeFile(tmp, JSON.stringify(db), err => {
-    if (err) { console.error('Save failed:', err.message); writing = false; return; }
-    fs.rename(tmp, DB_FILE, err2 => {
-      if (err2) console.error('Save failed:', err2.message);
-      writing = false;
-      if (pending) { pending = false; writeSoon(); }
-    });
-  });
-}
+const store = Store.open(DATA_DIR);
 function audit(user, method, key, body) {
   const entry = { t: new Date().toISOString(), user, method, path: key };
   if (body && typeof body.name === 'string') entry.name = body.name.slice(0, 120);
   fs.appendFile(AUDIT_FILE, JSON.stringify(entry) + '\n', () => { });
 }
 function backup() {
-  if (!fs.existsSync(DB_FILE)) return;
-  const dir = path.join(DATA_DIR, 'backups'); fs.mkdirSync(dir, { recursive: true });
-  const t = new Date(), slot = String(Math.floor(t.getUTCHours() / 6) * 6).padStart(2, '0');
-  const name = 'db-' + t.toISOString().slice(0, 10) + 'T' + slot + '.json';
-  fs.copyFile(DB_FILE, path.join(dir, name), () => {
-    const files = fs.readdirSync(dir).filter(f => f.startsWith('db-')).sort();
-    files.slice(0, Math.max(0, files.length - 28)).forEach(f => fs.unlink(path.join(dir, f), () => { }));
-  });
+  try {
+    fs.mkdirSync(BACKUP_DIR, { recursive: true });
+    const t = new Date(), slot = String(Math.floor(t.getUTCHours() / 6) * 6).padStart(2, '0');
+    store.backup(path.join(BACKUP_DIR, 'estimator-' + t.toISOString().slice(0, 10) + 'T' + slot + '.db'));
+    const files = fs.readdirSync(BACKUP_DIR).filter(f => /^estimator-.*\.db$/.test(f)).sort();
+    files.slice(0, Math.max(0, files.length - 28)).forEach(f => fs.unlink(path.join(BACKUP_DIR, f), () => { }));
+  } catch (e) { console.error('Backup failed:', e.message); }
 }
-backup(); setInterval(backup, 6 * 3600 * 1000).unref();
+if (require.main === module) { backup(); setInterval(backup, 6 * 3600 * 1000).unref(); }
 
 const SEG = /^[A-Za-z0-9_\-.~:@+]{1,200}$/;
 function parsePath(p, wantDoc) {
@@ -130,6 +119,7 @@ function validate(key, body) {
     if (d.end && !realDate(d.end)) return 'Project end must be a real date (YYYY-MM-DD) or empty';
     if (d.end && d.end < d.start) return 'Project end must be after the start';
     if (!isObj(d.a)) return 'Project data needs its factors';
+    const fe = validateFactors(d.a); if (fe) return fe;
     if (d.modules.length > 500 || d.team.length > 500 || d.holidays.length > 5000) return 'Too many modules, people or holidays';
     for (const m of d.modules) {
       if (!isObj(m) || typeof m.id !== 'string') return 'Every module needs an id';
@@ -159,6 +149,39 @@ function validate(key, body) {
     }
     if (body.ot != null && (!isObj(body.ot) || Object.values(body.ot).some(v => !optNum(v, 0, 100)))) return 'Setup and framework progress must be 0 to 100%';
   }
+  return null;
+}
+// Factors are optional (older projects get defaults on load) but, when present, must be sane.
+const NUM_RANGES = {
+  hoursPerDay: [1, 24], unplannedLeavePct: [0, 100], downtimePct: [0, 100], reviewPct: [0, 100], maintenancePct: [0, 100],
+  reusePct: [0, 90], retestPct: [0, 100], contingencyPct: [0, 200], rampStartPct: [0, 100], frameworkGatePct: [0, 100],
+  cicdExistingPct: [0, 100], managerAlloc: [0, 100], manualCycles: [0, 20], autoCycles: [0, 500], analysisPer100: [0, 1000],
+  accessDays: [0, 365], reviewDays: [0, 365], cycleGapDays: [0, 365], frameworkMaxPeople: [1, 100], commonMaxPeople: [1, 100],
+  leadSpan: [1, 100], managerAbove: [0, 10000], hireLeadDays: [0, 365], commonPerModule: [0, 10000], pertBest: [0.1, 2], pertWorst: [0.5, 10]
+};
+const ROWS = {
+  complexity: { key: 'str', name: 'str', design: [0, 1000], exec: [0, 1000], auto: [0, 1000] },
+  appTypes: { key: 'str', factor: [0, 10] }, testData: { key: 'str', factor: [0, 10] },
+  levels: { key: 'str', productivity: [0.05, 5], rampDays: [0, 365] }, skills: { key: 'str', factor: [0.05, 5], extraRamp: [0, 365] },
+  roles: { key: 'str', nonDevPct: [0, 100] }, oneTime: { name: 'str', hours: [0, 100000] }
+};
+function validateFactors(a) {
+  for (const [k, [lo, hi]] of Object.entries(NUM_RANGES)) if (a[k] !== undefined && !num(a[k], lo, hi)) return `Factor “${k}” must be a number from ${lo} to ${hi}`;
+  for (const [k, shape] of Object.entries(ROWS)) {
+    if (a[k] === undefined) continue;
+    if (!Array.isArray(a[k]) || !a[k].length || a[k].length > 200) return `Factor table “${k}” must be a non-empty list`;
+    for (const row of a[k]) {
+      if (!isObj(row)) return `Factor table “${k}” has a bad row`;
+      for (const [f, rule] of Object.entries(shape)) {
+        if (rule === 'str') { if (typeof row[f] !== 'string' || row[f].length > 300) return `Factor table “${k}”: “${f}” must be text`; }
+        else if (!num(row[f], rule[0], rule[1])) return `Factor table “${k}”: “${f}” must be a number from ${rule[0]} to ${rule[1]}`;
+      }
+    }
+  }
+  if (a.workDays !== undefined && (!Array.isArray(a.workDays) || !a.workDays.length || a.workDays.some(d => !Number.isInteger(d) || d < 0 || d > 6))) return 'Working days must be a list of days 0–6';
+  if (a.frameworkStatus !== undefined && !['new', 'extend', 'reuse'].includes(a.frameworkStatus)) return 'Framework status must be new, extend or reuse';
+  if (a.cicdMode !== undefined && !['new', 'existing', 'none'].includes(a.cicdMode)) return 'CI/CD must be new, existing or none';
+  for (const k of ['teamMix']) if (a[k] !== undefined && (!isObj(a[k]) || Object.values(a[k]).some(v => !num(v, 0, 100)))) return `Factor “${k}” must be percentages`;
   return null;
 }
 function deepMerge(target, patch) {
@@ -194,14 +217,21 @@ async function jsonBody(req, res) {
   return body;
 }
 
-const server = http.createServer(async (req, res) => {
+const handler = async (req, res) => {
   // Without logins the server only serves this machine; also refuse other Host names (DNS rebinding).
   if (!AUTH_ON) {
     const host = String(req.headers.host || '').replace(/:\d+$/, '').replace(/^\[|\]$/g, '');
     if (!['localhost', '127.0.0.1', '::1'].includes(host)) { res.writeHead(403, SEC); return res.end('Forbidden host'); }
   }
+  // A reverse proxy in front of a server without logins would make every visitor look local.
+  if (!AUTH_ON && (req.headers['x-forwarded-for'] || req.headers['forwarded'])) { res.writeHead(403, SEC); return res.end('Set up logins before putting a proxy in front of this server'); }
+  const ip = req.socket.remoteAddress || '';
+  if (AUTH_ON && throttled(ip)) { res.writeHead(429, { 'Retry-After': '900', ...SEC }); return res.end('Too many failed logins. Try again in 15 minutes.'); }
   const user = whoIs(req);
-  if (!user) { res.writeHead(401, { 'WWW-Authenticate': 'Basic realm="Test Effort Estimator"', ...SEC }); return res.end('Login required'); }
+  if (!user) {
+    if (AUTH_ON && req.headers.authorization) failed(ip);
+    res.writeHead(401, { 'WWW-Authenticate': 'Basic realm="Test Effort Estimator"', ...SEC }); return res.end('Login required');
+  }
   const url = new URL(req.url, 'http://x');
   let p;
   try { p = decodeURIComponent(url.pathname); } catch (e) { return send(res, 400, { code: 'invalid_argument', message: 'Bad path' }); }
@@ -211,46 +241,58 @@ const server = http.createServer(async (req, res) => {
     if (p.startsWith('/api/doc/')) {
       const key = parsePath(p.slice(9), true);
       if (!key) return send(res, 400, { code: 'invalid_argument', message: 'Bad document path' });
-      if (req.method === 'GET') return db[key] ? send(res, 200, { id: key.split('/').pop(), data: db[key] }) : send(res, 404, { code: 'not_found' });
-      if (req.method !== 'GET' && !writable(key)) return send(res, 403, { code: 'invalid_argument', message: 'Only projects and their weekly actuals can be saved' });
-      if (req.method === 'PUT') {
+      if (req.method === 'GET') { const d = store.get(key); return d ? send(res, 200, { id: key.split('/').pop(), data: d }) : send(res, 404, { code: 'not_found' }); }
+      if (!writable(key)) return send(res, 403, { code: 'invalid_argument', message: 'Only projects and their weekly actuals can be saved' });
+      const segs = key.split('/');
+      if (req.method === 'PUT' || req.method === 'PATCH') {
         const body = await jsonBody(req, res); if (!body) return;
-        // create-only: never replace a document someone else already created
-        const createOnly = body.createOnly === true; delete body.createOnly;
-        if (createOnly && db[key]) return send(res, 409, { code: 'exists', message: 'Already exists', current: db[key] });
-        // optimistic concurrency: the client says which revision it edited
-        const prevRev = body.prevRev; delete body.prevRev;
-        if (prevRev !== undefined && db[key] && db[key].rev !== undefined && db[key].rev !== prevRev) {
-          return send(res, 409, { code: 'conflict', message: 'Someone else saved this first', current: db[key] });
-        }
-        const err = validate(key, body); if (err) return send(res, 400, { code: 'invalid_argument', message: err });
-        body.updatedBy = user;
-        db[key] = body; persist(); audit(user, 'PUT', key, body);
-        return send(res, 200, { ok: true });
-      }
-      if (req.method === 'PATCH') {
-        const patch = await jsonBody(req, res); if (!patch) return;
-        if (!db[key]) return send(res, 404, { code: 'invalid_argument', message: 'Document does not exist' });
-        const next = deepMerge(JSON.parse(JSON.stringify(db[key])), patch);
-        const err = validate(key, next); if (err) return send(res, 400, { code: 'invalid_argument', message: err });
-        next.updatedBy = user;
-        db[key] = next; persist(); audit(user, 'PATCH', key, patch);
-        return send(res, 200, { ok: true });
+        const result = store.tx(() => {
+          // weekly actuals only for projects that exist and aren't deleted
+          if (segs.length === 4) { const proj = store.get(segs.slice(0, 2).join('/')); if (!proj) return [404, { code: 'invalid_argument', message: 'That project doesn’t exist' }]; if (proj.deletedAt) return [410, { code: 'deleted', message: 'That project has been deleted', deletedBy: proj.deletedBy, deletedAt: proj.deletedAt }]; }
+          const cur = store.get(key);
+          if (req.method === 'PATCH') {
+            if (!cur) return [404, { code: 'invalid_argument', message: 'Document does not exist' }];
+            if (cur.deletedAt && !('deletedAt' in body)) return [410, { code: 'deleted', message: 'This has been deleted', deletedBy: cur.deletedBy, deletedAt: cur.deletedAt }];
+            const next = deepMerge(JSON.parse(JSON.stringify(cur)), body);
+            if ('deletedAt' in body) next.deletedBy = body.deletedAt ? user : null;
+            const err = validate(key, next); if (err) return [400, { code: 'invalid_argument', message: err }];
+            next.updatedBy = user;
+            store.put(key, next, user, body.deletedAt ? 'DELETE' : 'deletedAt' in body ? 'RESTORE' : 'PATCH');
+            return [200, { ok: true }];
+          }
+          // PUT: create-only, no resurrection of deleted documents, optimistic concurrency
+          const createOnly = body.createOnly === true; delete body.createOnly;
+          const restore = body.restore === true; delete body.restore;
+          const prevRev = body.prevRev; delete body.prevRev;
+          if (createOnly && cur && !cur.deletedAt) return [409, { code: 'exists', message: 'Already exists', current: cur }];
+          if (cur && cur.deletedAt && !restore && !createOnly) return [410, { code: 'deleted', message: 'This has been deleted', deletedBy: cur.deletedBy, deletedAt: cur.deletedAt, current: cur }];
+          if (prevRev !== undefined && cur && !cur.deletedAt && cur.rev !== undefined && cur.rev !== prevRev) return [409, { code: 'conflict', message: 'Someone else saved this first', current: cur }];
+          const err = validate(key, body); if (err) return [400, { code: 'invalid_argument', message: err }];
+          body.updatedBy = user; delete body.deletedAt; delete body.deletedBy;
+          store.put(key, body, user, restore ? 'RESTORE' : 'PUT');
+          return [200, { ok: true }];
+        });
+        if (result[0] === 200) audit(user, req.method, key, body);
+        return send(res, result[0], result[1]);
       }
       if (req.method === 'DELETE') {
-        Object.keys(db).forEach(k => { if (k === key || k.startsWith(key + '/')) delete db[k]; });
-        persist(); audit(user, 'DELETE', key);
+        // Permanent removal. The page deletes by marking (deletedAt) so it can be undone.
+        store.tx(() => store.remove(key, user)); audit(user, 'PURGE', key);
         return send(res, 200, { ok: true });
       }
       return send(res, 405, { code: 'invalid_argument' });
     }
+    if (p.startsWith('/api/history/')) {
+      const key = parsePath(p.slice(13), true);
+      if (!key || req.method !== 'GET') return send(res, 400, { code: 'invalid_argument', message: 'Bad document path' });
+      return send(res, 200, { history: store.history(key) });
+    }
     if (p.startsWith('/api/col/')) {
       const col = parsePath(p.slice(9), false);
       if (!col || req.method !== 'GET') return send(res, 400, { code: 'invalid_argument', message: 'Bad collection path' });
-      const etag = `"v${version}"`;
+      const etag = `"v${store.version()}"`;
       if (req.headers['if-none-match'] === etag) { res.writeHead(304, { ETag: etag, ...SEC }); return res.end(); }
-      const depth = col.split('/').length + 1;
-      const docs = Object.keys(db).filter(k => k.startsWith(col + '/') && k.split('/').length === depth).map(k => ({ id: k.split('/').pop(), data: db[k] }));
+      const docs = store.list(col);
       return send(res, 200, { docs }, 'application/json', { ETag: etag });
     }
     if (req.method !== 'GET' && req.method !== 'HEAD') return send(res, 405, 'Method not allowed', 'text/plain');
@@ -264,16 +306,24 @@ const server = http.createServer(async (req, res) => {
   } catch (e) {
     console.error(e); send(res, 500, { code: 'unavailable', message: 'Server error' });
   }
-});
+};
+let tls = null;
+try {
+  if (process.env.TLS_PFX) tls = { pfx: fs.readFileSync(process.env.TLS_PFX), passphrase: process.env.TLS_PASSPHRASE || '' };
+  else if (process.env.TLS_CERT && process.env.TLS_KEY) tls = { cert: fs.readFileSync(process.env.TLS_CERT), key: fs.readFileSync(process.env.TLS_KEY) };
+} catch (e) { console.error('Could not read the HTTPS certificate: ' + e.message); process.exit(1); }
+const server = tls ? https.createServer(tls, handler) : http.createServer(handler);
 
 if (require.main === module) {
   server.listen(PORT, HOST, () => {
-    const where = LOOPBACK ? `http://localhost:${PORT} (this machine only)` : `http://${HOST}:${PORT}`;
+    const scheme = tls ? 'https' : 'http';
+    const where = LOOPBACK ? `${scheme}://localhost:${PORT} (this machine only)` : `${scheme}://${HOST}:${PORT}`;
     console.log(`Test Effort Estimator running at ${where}`);
-    console.log(`Data is saved in ${DB_FILE}; changes are logged to ${AUDIT_FILE}`);
+    console.log(`Database: ${store.file}; backups: ${BACKUP_DIR}; changes are logged to ${AUDIT_FILE}`);
+    if (!LOOPBACK && !tls) console.log('Warning: not using HTTPS, so logins travel unencrypted. Set TLS_CERT/TLS_KEY or TLS_PFX.');
     console.log(AUTH_ON ? `Logins: ${Object.keys(USERS).join(', ')}` : 'No login set (fine for this machine only).');
   });
-  const shutdown = () => { server.close(); setTimeout(() => process.exit(0), writing || pending ? 500 : 0); };
+  const shutdown = () => { server.close(); try { store.close(); } catch (e) { } process.exit(0); };
   process.on('SIGINT', shutdown); process.on('SIGTERM', shutdown);
 }
 module.exports = { server, validate, deepMerge, clean };

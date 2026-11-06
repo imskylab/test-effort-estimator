@@ -147,6 +147,9 @@ tr.sel td{background:var(--accent-soft)}
 .banner.conflict{background:var(--bad-bg);color:var(--ink);border:1px solid var(--bad)}
 .chip-bad{border-color:var(--bad);color:var(--bad)}
 .chip-good{border-color:var(--good);color:var(--good)}
+#toast{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(16px + env(safe-area-inset-bottom,0px));z-index:30;display:flex;gap:10px;align-items:center;background:var(--ink);color:var(--bg);padding:8px 10px 8px 14px;border-radius:8px;box-shadow:0 6px 24px rgb(0 0 0 / .2);max-width:calc(100% - 32px);font-size:13.5px}
+#toast .btn{background:var(--bg);color:var(--ink);border-color:var(--bg)}
+#toast .btn.ghost{background:none;color:var(--bg);border-color:transparent}
 .ftip{position:fixed;white-space:pre-line;max-width:320px;z-index:20}
 .ms-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:6px 18px}
 .ms{display:flex;gap:12px;align-items:baseline;padding:6px 0;border-bottom:1px solid var(--line-2);font-size:13.5px}

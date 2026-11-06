@@ -77,7 +77,7 @@ copying is paused until you refresh it or confirm your edits.
 
 ## Run it
 
-Needs Node.js 18 or later. There are no packages to install.
+Needs Node.js 22.13 or later (Node 24 LTS recommended). There are no packages to install: it uses Node's built-in SQLite.
 
 ```
 npm start
@@ -95,13 +95,23 @@ Set these as environment variables before starting:
 | `HOST`       | `127.0.0.1` | This machine only. Use `0.0.0.0` to share on your network (needs a login) |
 | `BASIC_AUTH` | none        | Logins: `user:password`, or several as `alice:pw1,bob:pw2`          |
 | `USERS_FILE` | none        | Path to a JSON file of logins: `{ "alice": "pw1", "bob": "pw2" }`   |
-| `DATA_DIR`   | `./data`    | Where projects, actuals, backups and the audit log are saved        |
+| `DATA_DIR`   | `./data`    | Where the database (`estimator.db`) and audit log are kept          |
+| `BACKUP_DIR` | `DATA_DIR/backups` | Where backups go. Put it on a different disk or a network share |
+| `TLS_CERT`, `TLS_KEY` | none | PEM certificate and key: serves HTTPS                         |
+| `TLS_PFX`, `TLS_PASSPHRASE` | none | Or a .pfx / .p12 certificate (common on Windows) and its password |
 
-The server refuses to share on the network without a login. Every change records who made
-it (`updatedBy` on the saved document, and one line per change in `data/audit.log`).
+- The server refuses to share on the network without a login, and warns if it does so
+  without HTTPS (passwords would travel unencrypted). Use HTTPS on the intranet.
+- Ten wrong passwords from one address lock it out for 15 minutes.
+- Without logins it only answers requests addressed to localhost, and refuses requests that
+  come through a proxy.
+- Every change records who made it: `updatedBy` on the record, a line in `data/audit.log`,
+  and a row in the database's history table (`GET /api/history/<path>` lists it).
 
-Windows (PowerShell): `$env:HOST="0.0.0.0"; $env:BASIC_AUTH="alice:pw1,bob:pw2"; npm start`
-macOS/Linux: `HOST=0.0.0.0 BASIC_AUTH=alice:pw1,bob:pw2 npm start`
+Windows (PowerShell):
+```
+$env:HOST="0.0.0.0"; $env:USERS_FILE="D:\secure\estimator-users.json"; $env:TLS_PFX="D:\secure\estimator.pfx"; $env:TLS_PASSPHRASE="…"; npm start
+```
 
 ## Development
 
@@ -122,6 +132,7 @@ Edit files in `src/`, never `public/index.html` directly: the build overwrites i
 | `public/store.js` | Storage adapter for the self-hosted version (REST API with polling). |
 | `public/vendor/` | SheetJS 0.18.5 for Excel export. |
 | `server.js` | Zero-dependency Node server: static files plus a JSON document API. |
+| `lib/store.js` | SQLite storage: documents, change history, backups, migration from `db.json`. |
 | `scripts/build.js` | Assembles the two builds. |
 | `test/` | Engine, server and browser tests (`node --test`). |
 
@@ -142,8 +153,15 @@ Projects live at `projects/<id>`; weekly actuals at `projects/<id>/actuals/<week
 
 ## Data and backups
 
-- Everything is saved in `data/db.json`. The `data/` folder is git-ignored.
-- A dated copy goes to `data/backups/` every 6 hours (last 14 kept).
+- Everything is stored in a SQLite database, `data/estimator.db` (git-ignored). Each project
+  and each week of actuals is a record; every change is also kept in a history table.
+- Upgrading from an older version: on first start, `data/db.json` is moved into the database
+  automatically and renamed `db.json.migrated`.
+- A consistent copy of the database goes to the backup folder every 6 hours (last 28 kept,
+  about a week). Point `BACKUP_DIR` at another disk or share, or include it in IT backups.
+- Deleting a project or a week only marks it as deleted: it can be undone straight away or
+  restored later from "Deleted" in the header. A deleted project can't be brought back by an
+  old open copy saving over it; the person editing is told and can choose to restore it.
 - To move the tool to another machine, copy the whole folder including `data/`.
 
 ## Keep it running
@@ -155,16 +173,20 @@ For HTTPS, put it behind your usual reverse proxy (IIS, nginx).
 ## Notes
 
 - Several people can work at once. Changes from others appear within about 4 seconds.
-  Plan edits are merged: if two people change different things (say, two modules), both
-  changes are kept automatically. Only when both change the same thing is the second person
+  Plan edits are merged field by field: if two people change different things (two modules,
+  two fields of the same module, two rows of a factor table), both changes are kept
+  automatically. Only when both change the same thing is the second person
   shown both values and asked which to keep. Weekly actuals are saved field by field; a
   week that already exists is never replaced, and changing a field a colleague just changed
   asks first (with "keep both" for notes).
 - The server checks saved projects and actuals strictly (real dates, counts, percentages),
   only accepts projects and their weekly actuals, and ignores keys that could tamper with
   the server itself. Without logins it only answers requests addressed to localhost.
-- Results are calculated in a background worker, so editing a large plan doesn't freeze
-  the page; copies, exports and baselines always use freshly calculated numbers.
+- Results are calculated in a background worker, so editing, opening a project or receiving
+  a colleague's changes doesn't freeze the page; copies, exports and baselines wait for
+  freshly calculated numbers.
+- If a saved project has invalid settings, they're reset to defaults when it's opened and
+  you're told which ones, instead of the page failing.
 - Basic auth sends the password with every request, so use HTTPS if the server is
   reachable outside a trusted network.
 - The page loads its fonts from Google Fonts; without internet it falls back to system fonts.

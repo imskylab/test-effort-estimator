@@ -49,6 +49,7 @@ test('rejects malformed projects and actuals', async () => {
   try {
     let r = await req(s.base, 'PUT', '/api/doc/projects/bad', { name: 'x', data: { modules: 'nope' } });
     assert.strictEqual(r.status, 400);
+    await req(s.base, 'PUT', '/api/doc/projects/p', project('P', 'r1'));
     r = await req(s.base, 'PUT', '/api/doc/projects/p/actuals/w', { week: 'yesterday' });
     assert.strictEqual(r.status, 400);
     r = await req(s.base, 'PUT', '/api/doc/projects/p/actuals/w', { week: '2026-11-16', mods: { m1: { designed: -5 } } });
@@ -97,6 +98,7 @@ test('prototype keys cannot crash or poison the server', async () => {
   const s = start({ BASIC_AUTH: 'alice:pw1' }); await s.ready;
   const auth = { Authorization: 'Basic ' + Buffer.from('alice:pw1').toString('base64') };
   try {
+    await req(s.base, 'PUT', '/api/doc/projects/p', project('P', 'r1'), auth);
     await req(s.base, 'PUT', '/api/doc/projects/p/actuals/2026-11-16', { week: '2026-11-16', mods: {} }, auth);
     const raw = (method, body) => fetch(s.base + '/api/doc/projects/p/actuals/2026-11-16', { method, headers: { 'Content-Type': 'application/json', ...auth }, body });
     await raw('PATCH', '{"__proto__":{"hasOwnProperty":1,"rev":"x"}}');
@@ -114,6 +116,7 @@ test('strict validation: impossible dates, negative counts, bad mixes, other col
   try {
     const bad = async (url, body) => (await req(s.base, 'PUT', url, body)).status;
     const P = project('A', 'r1');
+    await req(s.base, 'PUT', '/api/doc/projects/x', P);
     assert.strictEqual(await bad('/api/doc/projects/x', { ...P, data: { ...P.data, start: '2026-13-45' } }), 400);
     assert.strictEqual(await bad('/api/doc/projects/x', { ...P, data: { ...P.data, modules: [{ id: 'm', tcs: -500, mix: {} }] } }), 400);
     assert.strictEqual(await bad('/api/doc/projects/x', { ...P, data: { ...P.data, modules: [{ id: 'm', tcs: 5, mix: { S: 'bad' } }] } }), 400);
@@ -127,6 +130,7 @@ test('strict validation: impossible dates, negative counts, bad mixes, other col
 test('create-only never replaces an existing week', async () => {
   const s = start({}); await s.ready;
   try {
+    await req(s.base, 'PUT', '/api/doc/projects/p', project('P', 'r1'));
     let r = await req(s.base, 'PUT', '/api/doc/projects/p/actuals/2026-11-16', { week: '2026-11-16', mods: { m: { designed: 30 } }, createOnly: true });
     assert.strictEqual(r.status, 200);
     r = await req(s.base, 'PUT', '/api/doc/projects/p/actuals/2026-11-16', { week: '2026-11-16', mods: {}, createOnly: true });
@@ -143,4 +147,68 @@ test('without logins, requests for other host names are refused', async () => {
     const status = await new Promise(res => http.get(s.base + '/api/health', { headers: { Host: 'evil.example.com' } }, r => res(r.statusCode)));
     assert.strictEqual(status, 403);
   } finally { s.stop(); }
+});
+
+test('a deleted project cannot be brought back by an old save, only restored on purpose', async () => {
+  const s = start({}); await s.ready;
+  try {
+    await req(s.base, 'PUT', '/api/doc/projects/p', project('P', 'r1'));
+    await req(s.base, 'PUT', '/api/doc/projects/p/actuals/2026-11-16', { week: '2026-11-16', mods: { m1: { designed: 5 } } });
+    let r = await req(s.base, 'PATCH', '/api/doc/projects/p', { deletedAt: Date.now() });
+    assert.strictEqual(r.status, 200);
+    r = await req(s.base, 'PUT', '/api/doc/projects/p', { ...project('P edited', 'r2'), prevRev: 'r1' });
+    assert.strictEqual(r.status, 410, 'stale save of a deleted project is refused');
+    r = await req(s.base, 'PATCH', '/api/doc/projects/p/actuals/2026-11-16', { notes: 'x' });
+    assert.strictEqual(r.status, 410, 'its actuals are frozen too');
+    r = await req(s.base, 'PATCH', '/api/doc/projects/p', { deletedAt: null });
+    assert.strictEqual(r.status, 200, 'restored on purpose');
+    const a = await (await req(s.base, 'GET', '/api/doc/projects/p/actuals/2026-11-16')).json();
+    assert.strictEqual(a.data.mods.m1.designed, 5, 'weekly actuals come back with it');
+    const h = await (await req(s.base, 'GET', '/api/history/projects/p')).json();
+    assert.ok(h.history.some(x => x.op === 'DELETE') && h.history.some(x => x.op === 'RESTORE'));
+  } finally { s.stop(); }
+});
+
+test('bad factor settings are refused', async () => {
+  const s = start({}); await s.ready;
+  try {
+    const P = project('A', 'r1');
+    const bad = async a => (await req(s.base, 'PUT', '/api/doc/projects/x', { ...P, data: { ...P.data, a } })).status;
+    assert.strictEqual(await bad({ complexity: 'oops' }), 400);
+    assert.strictEqual(await bad({ hoursPerDay: -8 }), 400);
+    assert.strictEqual(await bad({ complexity: [{ key: 'S', name: 'S', design: 1, exec: 1, auto: 'x' }] }), 400);
+    assert.strictEqual(await bad({ workDays: [9] }), 400);
+    assert.strictEqual(await bad({ hoursPerDay: 8, workDays: [1, 2, 3, 4, 5] }), 200);
+  } finally { s.stop(); }
+});
+
+test('repeated wrong passwords are throttled', async () => {
+  const s = start({ BASIC_AUTH: 'alice:pw1' }); await s.ready;
+  try {
+    const wrong = { Authorization: 'Basic ' + Buffer.from('alice:nope').toString('base64') };
+    for (let i = 0; i < 10; i++) await req(s.base, 'GET', '/api/health', null, wrong);
+    const r = await req(s.base, 'GET', '/api/health', null, { Authorization: 'Basic ' + Buffer.from('alice:pw1').toString('base64') });
+    assert.strictEqual(r.status, 429);
+  } finally { s.stop(); }
+});
+
+test('without logins, a proxy in front is refused', async () => {
+  const s = start({}); await s.ready;
+  try {
+    const r = await req(s.base, 'GET', '/api/health', null, { 'X-Forwarded-For': '10.0.0.5' });
+    assert.strictEqual(r.status, 403);
+  } finally { s.stop(); }
+});
+
+test('an old db.json is moved into the database on first start', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tee-mig-'));
+  fs.writeFileSync(path.join(dir, 'db.json'), JSON.stringify({ 'projects/old': project('Old project', 'r1') }));
+  const p = ++port;
+  const child = spawn(process.execPath, [SERVER], { env: { ...process.env, PORT: String(p), DATA_DIR: dir, HOST: '127.0.0.1' }, stdio: ['ignore', 'pipe', 'pipe'] });
+  await new Promise(res => child.stdout.on('data', d => { if (String(d).includes('running at')) res(); }));
+  try {
+    const d = await (await fetch(`http://127.0.0.1:${p}/api/doc/projects/old`)).json();
+    assert.strictEqual(d.data.name, 'Old project');
+    assert.ok(fs.existsSync(path.join(dir, 'db.json.migrated')));
+  } finally { child.kill(); }
 });
