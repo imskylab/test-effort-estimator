@@ -1,4 +1,4 @@
-/* Browser adapter: gives the estimator the same storage and download interface it uses
+/* Browser adapter: gives QuEST the same storage and download interface it uses
    on claude.ai, backed by this server's REST API. Changes from other users appear within a few seconds. */
 (function () {
   const POLL_MS = 4000;

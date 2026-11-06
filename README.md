@@ -1,4 +1,7 @@
-# Test Effort Estimator
+# QuEST: Quality Estimation & Scheduling Tool
+
+*Estimate it. Plan it. Track it.*
+
 
 Estimates effort, finish date, team size and achievable scope for manual and automation
 test projects, and tracks weekly actuals against the plan. Everyone who opens the page
@@ -125,7 +128,7 @@ through the API. Setting up Windows sign-in with IIS is in [PILOT.md](PILOT.md).
 
 Windows (PowerShell):
 ```
-$env:HOST="0.0.0.0"; $env:USERS_FILE="D:\secure\estimator-users.json"; $env:TLS_PFX="D:\secure\estimator.pfx"; $env:TLS_PASSPHRASE="…"; npm start
+$env:HOST="0.0.0.0"; $env:USERS_FILE="D:\secure\quest-users.json"; $env:TLS_PFX="D:\secure\estimator.pfx"; $env:TLS_PASSPHRASE="…"; npm start
 ```
 
 ## Development
@@ -183,7 +186,7 @@ Projects live at `projects/<id>`; weekly actuals at `projects/<id>/actuals/<week
 
 ## Keep it running
 
-Use any process manager, for example `npx pm2 start server.js --name estimator`,
+Use any process manager, for example `npx pm2 start server.js --name quest`,
 or a Windows service / systemd unit pointing at `node server.js`.
 For HTTPS, put it behind your usual reverse proxy (IIS, nginx).
 

@@ -1,6 +1,6 @@
-# Intranet pilot kit
+# QuEST intranet pilot kit
 
-Everything needed to run a 3–4 week pilot of the Test Effort Estimator with two or three
+Everything needed to run a 3–4 week pilot of QuEST (Quality Estimation & Scheduling Tool) with two or three
 delivery teams: server setup, Windows sign-in, a 15-minute quick start for pilot users, what
 to try, and the feedback to collect.
 
@@ -12,8 +12,8 @@ to try, and the feedback to collect.
 - [ ] `npm test` passes on the server.
 - [ ] `DATA_DIR` on a disk that's backed up; `BACKUP_DIR` on a different disk or share.
 - [ ] Runs as a service so it survives reboots (see "Keep it running" in README.md).
-- [ ] An intranet name for it, e.g. `estimator.example.local`, and an HTTPS certificate for that name.
-- [ ] Users file created (see section 3) and stored outside the repo, e.g. `D:\secure\estimator-users.json`.
+- [ ] An intranet name for it, e.g. `quest.example.local`, and an HTTPS certificate for that name.
+- [ ] Users file created (see section 3) and stored outside the repo, e.g. `D:\secure\quest-users.json`.
 
 ## 2. Choose how people sign in
 
@@ -36,16 +36,16 @@ plus one password login for a guest.
    ```
    %windir%\system32\inetsrv\appcmd.exe set config -section:system.webServer/rewrite/allowedServerVariables /+"[name='HTTP_X_REMOTE_USER']" /commit:apphost
    ```
-5. Create a site (e.g. `estimator.example.local`, HTTPS binding with your certificate) pointing at
+5. Create a site (e.g. `quest.example.local`, HTTPS binding with your certificate) pointing at
    an empty folder, and copy `deploy\web.config` into that folder.
 6. Site → **Authentication**: enable **Windows Authentication**, disable **Anonymous Authentication**.
-7. Start the estimator on this machine only, trusting the header from IIS:
+7. Start QuEST on this machine only, trusting the header from IIS:
    ```
-   $env:HOST="127.0.0.1"; $env:AUTH_HEADER="X-Remote-User"; $env:USERS_FILE="D:\secure\estimator-users.json"; npm start
+   $env:HOST="127.0.0.1"; $env:AUTH_HEADER="X-Remote-User"; $env:USERS_FILE="D:\secure\quest-users.json"; npm start
    ```
    Keep `HOST=127.0.0.1`: then nobody can reach Node directly and bypass IIS. The header is only
    trusted from this machine (`TRUSTED_PROXY`, default `127.0.0.1,::1`).
-8. Check: browse to `https://estimator.example.local/api/me`. You should see your Windows name,
+8. Check: browse to `https://quest.example.local/api/me`. You should see your Windows name,
    e.g. `{"user":"MYDOMAIN\\jay","role":"admin",...}`. If you're asked for a password instead, the
    site isn't in the browser's Local intranet zone; ask IT to add it via group policy.
 

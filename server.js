@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /*
- * Test Effort Estimator - self-hosted server
+ * QuEST (Quality Estimation & Scheduling Tool) - self-hosted server
  * No packages to install: needs Node.js 22.13 or later (or 24), for its built-in SQLite.
  *
  * Environment variables (all optional):
@@ -273,10 +273,10 @@ const handler = async (req, res) => {
   const ip = req.socket.remoteAddress || '';
   if (AUTH_ON && throttled(ip)) { res.writeHead(429, { 'Retry-After': '900', ...SEC }); return res.end('Too many failed logins. Try again in 15 minutes.'); }
   const who = whoIs(req);
-  if (who && who.denied) { audit(who.denied, 'DENIED', req.url.slice(0, 200)); res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8', ...SEC }); return res.end(`${who.denied} isn’t on the list of people who can use the Test Effort Estimator. Ask the tool’s owner to add you.`); }
+  if (who && who.denied) { audit(who.denied, 'DENIED', req.url.slice(0, 200)); res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8', ...SEC }); return res.end(`${who.denied} isn’t on the list of people who can use QuEST. Ask the tool’s owner to add you.`); }
   if (!who) {
     if (AUTH_ON && req.headers.authorization) failed(ip);
-    res.writeHead(401, { 'WWW-Authenticate': 'Basic realm="Test Effort Estimator"', ...SEC }); return res.end('Login required');
+    res.writeHead(401, { 'WWW-Authenticate': 'Basic realm="QuEST"', ...SEC }); return res.end('Login required');
   }
   const { user, role } = who;
   const url = new URL(req.url, 'http://x');
@@ -367,7 +367,7 @@ if (require.main === module) {
   server.listen(PORT, HOST, () => {
     const scheme = tls ? 'https' : 'http';
     const where = LOOPBACK ? `${scheme}://localhost:${PORT} (this machine only)` : `${scheme}://${HOST}:${PORT}`;
-    console.log(`Test Effort Estimator running at ${where}`);
+    console.log(`QuEST running at ${where}`);
     console.log(`Database: ${store.file}; backups: ${BACKUP_DIR}; changes are logged to ${AUDIT_FILE}`);
     if (!LOOPBACK && !tls) console.log('Warning: not using HTTPS, so logins travel unencrypted. Set TLS_CERT/TLS_KEY or TLS_PFX.');
     if (AUTH_HEADER) console.log(`Windows sign-in: trusting the ${AUTH_HEADER} header from ${TRUSTED_PROXY.join(', ')}`);
