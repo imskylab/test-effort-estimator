@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /*
- * QuEST (Quality Estimation & Scheduling Tool) - self-hosted server
+ * QuEST - self-hosted server. The name shown is configurable: see lib/brand.js.
  * No packages to install: needs Node.js 22.13 or later (or 24), for its built-in SQLite.
  *
  * Environment variables (all optional):
@@ -11,13 +11,14 @@
  *   USERS_FILE  Path to a JSON file of users. Each entry is a password, or an object:
  *               { "alice": "pw1",
  *                 "bob":   { "password": "pw2", "role": "viewer" },
- *                 "MYDOMAIN\\jay": { "role": "admin" },        Windows / Entra sign-in, no password
+ *                 "MYDOMAIN\\alice": { "role": "admin" },         Windows / Entra sign-in, no password
  *                 "*":     { "role": "viewer" } }                any other signed-in Windows user
  *               Roles: viewer (read only), editor (default), admin (editor + permanent deletes).
  *   AUTH_HEADER Windows / Entra sign-in through a front end (IIS with Windows Authentication,
  *               Entra application proxy, ...): the header that carries the signed-in user,
  *               e.g. X-Remote-User. Trusted only from TRUSTED_PROXY addresses.
  *   TRUSTED_PROXY Addresses allowed to send AUTH_HEADER (default 127.0.0.1,::1)
+ *   BRAND_FILE  JSON file with the name, full name and tagline to show (or APP_NAME etc.; see lib/brand.js)
  *   DATA_DIR    Folder for the database and audit log (default ./data)
  *   BACKUP_DIR  Folder for backups (default DATA_DIR/backups); put it on another disk
  *   TLS_CERT, TLS_KEY   PEM certificate and key files to serve HTTPS
@@ -27,6 +28,7 @@
 const http = require('http');
 const https = require('https');
 const Store = require('./lib/store');
+const Brand = require('./lib/brand');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
@@ -38,6 +40,8 @@ const AUDIT_FILE = path.join(DATA_DIR, 'audit.log');
 const BACKUP_DIR = path.resolve(process.env.BACKUP_DIR || path.join(DATA_DIR, 'backups'));
 const PUBLIC = path.join(__dirname, 'public');
 const MAX_BODY = 5 * 1024 * 1024;
+let BRAND, BRAND_SOURCE;
+try { ({ brand: BRAND, source: BRAND_SOURCE } = Brand.load()); } catch (e) { console.error(e.message); process.exit(1); }
 
 /* ---------- logins and roles ---------- */
 // USERS maps a lower-cased name to { name, password, role }. Names compare case-insensitively,
@@ -66,7 +70,7 @@ try {
 const AUTH_HEADER = (process.env.AUTH_HEADER || '').trim().toLowerCase();
 const TRUSTED_PROXY = (process.env.TRUSTED_PROXY || '127.0.0.1,::1').split(',').map(s => s.trim()).filter(Boolean);
 if (AUTH_HEADER && ![...USERS.keys()].some(k => !USERS.get(k).password)) {
-  console.error('AUTH_HEADER is set, but USERS_FILE lists nobody who signs in with Windows. Add entries such as "MYDOMAIN\\\\jay": { "role": "editor" } or "*": { "role": "viewer" }.');
+  console.error('AUTH_HEADER is set, but USERS_FILE lists nobody who signs in with Windows. Add entries such as "MYDOMAIN\\\\alice": { "role": "editor" } or "*": { "role": "viewer" }.');
   process.exit(1);
 }
 const AUTH_ON = USERS.size > 0 || !!AUTH_HEADER;
@@ -273,10 +277,10 @@ const handler = async (req, res) => {
   const ip = req.socket.remoteAddress || '';
   if (AUTH_ON && throttled(ip)) { res.writeHead(429, { 'Retry-After': '900', ...SEC }); return res.end('Too many failed logins. Try again in 15 minutes.'); }
   const who = whoIs(req);
-  if (who && who.denied) { audit(who.denied, 'DENIED', req.url.slice(0, 200)); res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8', ...SEC }); return res.end(`${who.denied} isn’t on the list of people who can use QuEST. Ask the tool’s owner to add you.`); }
+  if (who && who.denied) { audit(who.denied, 'DENIED', req.url.slice(0, 200)); res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8', ...SEC }); return res.end(`${who.denied} isn’t on the list of people who can use ${BRAND.name}. Ask the tool’s owner to add you.`); }
   if (!who) {
     if (AUTH_ON && req.headers.authorization) failed(ip);
-    res.writeHead(401, { 'WWW-Authenticate': 'Basic realm="QuEST"', ...SEC }); return res.end('Login required');
+    res.writeHead(401, { 'WWW-Authenticate': `Basic realm="${(BRAND.name.replace(/[^\x20-\x7e]|["\\]/g, '') || 'Login')}"`, ...SEC }); return res.end('Login required');
   }
   const { user, role } = who;
   const url = new URL(req.url, 'http://x');
@@ -350,6 +354,7 @@ const handler = async (req, res) => {
     fs.readFile(file, (err, buf) => {
       if (err) return send(res, 404, 'Not found', 'text/plain');
       res.writeHead(200, { 'Content-Type': TYPES[path.extname(file)] || 'application/octet-stream', 'Cache-Control': 'no-cache', ...SEC });
+      if (path.extname(file) === '.html') buf = Brand.apply(buf.toString('utf8'), BRAND);
       res.end(req.method === 'HEAD' ? undefined : buf);
     });
   } catch (e) {
@@ -367,7 +372,8 @@ if (require.main === module) {
   server.listen(PORT, HOST, () => {
     const scheme = tls ? 'https' : 'http';
     const where = LOOPBACK ? `${scheme}://localhost:${PORT} (this machine only)` : `${scheme}://${HOST}:${PORT}`;
-    console.log(`QuEST running at ${where}`);
+    console.log(`${BRAND.name} running at ${where}`);
+    console.log(`Name shown: ${BRAND.name} · ${BRAND.fullName} (${BRAND_SOURCE})`);
     console.log(`Database: ${store.file}; backups: ${BACKUP_DIR}; changes are logged to ${AUDIT_FILE}`);
     if (!LOOPBACK && !tls) console.log('Warning: not using HTTPS, so logins travel unencrypted. Set TLS_CERT/TLS_KEY or TLS_PFX.');
     if (AUTH_HEADER) console.log(`Windows sign-in: trusting the ${AUTH_HEADER} header from ${TRUSTED_PROXY.join(', ')}`);

@@ -4,6 +4,9 @@ data/
 # Build output for the claude.ai artifact (rebuild with npm run build)
 dist/
 
+# Your organisation's branding (see lib/brand.js)
+brand.json
+
 node_modules/
 *.log
 .DS_Store

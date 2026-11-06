@@ -4,10 +4,13 @@
  *   public/index.html          self-hosted version, served by server.js
  *   dist/claude-artifact.html  version published as a claude.ai artifact
  *                              (no doctype/head; the platform adds them)
+ * The self-hosted page keeps %%APP_…%% placeholders, which server.js fills from the branding
+ * settings when it serves the page. The artifact build fills them now (brand.json or defaults).
  */
 'use strict';
 const fs = require('fs');
 const path = require('path');
+const Brand = require('../lib/brand');
 
 const root = path.join(__dirname, '..');
 const read = f => fs.readFileSync(path.join(root, 'src', f), 'utf8');
@@ -54,5 +57,6 @@ ${ui}
 
 fs.writeFileSync(path.join(root, 'public', 'index.html'), selfHosted);
 fs.mkdirSync(path.join(root, 'dist'), { recursive: true });
-fs.writeFileSync(path.join(root, 'dist', 'claude-artifact.html'), artifact);
-console.log('Built public/index.html and dist/claude-artifact.html');
+const { brand, source } = Brand.load();
+fs.writeFileSync(path.join(root, 'dist', 'claude-artifact.html'), Brand.apply(artifact, brand));
+console.log(`Built public/index.html and dist/claude-artifact.html (artifact named “${brand.name}”, from ${source})`);

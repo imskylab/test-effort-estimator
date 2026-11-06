@@ -1,7 +1,7 @@
 {
   "name": "quest",
   "version": "1.10.0",
-  "description": "QuEST, the Quality Estimation & Scheduling Tool: estimates effort, finish date, team size and achievable scope for manual and automation test projects, and tracks weekly actuals.",
+  "description": "QuEST, a Quality Estimation & Scheduling Tool: estimates effort, finish date, team size and achievable scope for manual and automation test projects, and tracks weekly actuals.",
   "private": true,
   "main": "server.js",
   "scripts": {

@@ -100,6 +100,8 @@ Set these as environment variables before starting:
 | `USERS_FILE` | none        | Path to a JSON file of users and roles (below)                      |
 | `AUTH_HEADER` | none       | Windows / Entra sign-in through a front end such as IIS: the header carrying the signed-in user, e.g. `X-Remote-User` |
 | `TRUSTED_PROXY` | `127.0.0.1,::1` | Addresses allowed to send `AUTH_HEADER`                       |
+| `BRAND_FILE` | `./brand.json` if present | Your organisation's name for the tool (below)            |
+| `APP_NAME`, `APP_FULL_NAME`, `APP_TAGLINE`, `APP_MARK` | none | Same, as variables; they win over the file |
 | `DATA_DIR`   | `./data`    | Where the database (`estimator.db`) and audit log are kept          |
 | `BACKUP_DIR` | `DATA_DIR/backups` | Where backups go. Put it on a different disk or a network share |
 | `TLS_CERT`, `TLS_KEY` | none | PEM certificate and key: serves HTTPS                         |
@@ -110,9 +112,24 @@ a Windows or Entra user, signed in by the front end. `"*"` sets the role for any
 Windows user; without it, only listed people get in.
 
 ```json
-{ "MYDOMAIN\\jay": { "role": "admin" }, "MYDOMAIN\\priya": {}, "*": { "role": "viewer" },
+{ "MYDOMAIN\\alice": { "role": "admin" }, "MYDOMAIN\\bob": {}, "*": { "role": "viewer" },
   "pilot-guest": { "password": "change-me", "role": "viewer" } }
 ```
+
+## Your organisation's name and users
+
+Nothing about an organisation is in this repo: its name and its people are set on the server.
+
+- **Name.** The page shows "QuEST · Quality Estimation & Scheduling Tool" unless you set your own.
+  Copy `deploy/brand.example.json` to `brand.json` next to `server.js` (git-ignored), or point
+  `BRAND_FILE` at a file kept elsewhere:
+  ```json
+  { "name": "QuEST", "fullName": "Acme Estimation & Scheduling Tool", "tagline": "Estimate it. Plan it. Track it.", "mark": "Q" }
+  ```
+  Any field can be left out. Restart the server after a change. For the claude.ai build,
+  `npm run build` uses the same `brand.json`.
+- **Users.** Logins and roles live in the users file named by `USERS_FILE`, kept outside the repo
+  (`deploy/users.example.json` shows the format). Windows sign-in needs no names in the code.
 
 Roles: `viewer` can open everything and try what-ifs on screen, but nothing is saved; `editor`
 (the default) can save, log actuals, create and delete; `admin` can also delete permanently
@@ -152,7 +169,8 @@ Edit files in `src/`, never `public/index.html` directly: the build overwrites i
 | `server.js` | Zero-dependency Node server: static files plus a JSON document API. |
 | `lib/store.js` | SQLite storage: documents, change history, backups, migration from `db.json`. |
 | `scripts/build.js` | Assembles the two builds. |
-| `deploy/` | IIS `web.config` for Windows sign-in and an example users file. |
+| `deploy/` | IIS `web.config` for Windows sign-in, example users and branding files. |
+| `lib/brand.js` | Loads the organisation's name for the tool and fills it into the page. |
 | `PILOT.md` | Intranet pilot kit: setup, sign-in, quick start, scenarios, feedback. |
 | `test/` | Engine, server and browser tests (`node --test`). |
 

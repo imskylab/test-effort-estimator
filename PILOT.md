@@ -1,6 +1,6 @@
 # QuEST intranet pilot kit
 
-Everything needed to run a 3–4 week pilot of QuEST (Quality Estimation & Scheduling Tool) with two or three
+Everything needed to run a 3–4 week pilot of QuEST with two or three
 delivery teams: server setup, Windows sign-in, a 15-minute quick start for pilot users, what
 to try, and the feedback to collect.
 
@@ -13,13 +13,14 @@ to try, and the feedback to collect.
 - [ ] `DATA_DIR` on a disk that's backed up; `BACKUP_DIR` on a different disk or share.
 - [ ] Runs as a service so it survives reboots (see "Keep it running" in README.md).
 - [ ] An intranet name for it, e.g. `quest.example.local`, and an HTTPS certificate for that name.
+- [ ] Branding set: `brand.json` with your organisation's name for the tool (see README, "Your organisation's name and users").
 - [ ] Users file created (see section 3) and stored outside the repo, e.g. `D:\secure\quest-users.json`.
 
 ## 2. Choose how people sign in
 
 | Option | Use when | People see |
 |--------|----------|------------|
-| **A. Windows sign-in through IIS** (recommended) | your organisation machines are joined to Active Directory, or to Entra ID with on-premises sync | No password prompt; they're signed in as their Windows user |
+| **A. Windows sign-in through IIS** (recommended) | Your machines are joined to Active Directory, or to Entra ID with on-premises sync | No password prompt; they're signed in as their Windows user |
 | **B. Entra ID through a front end** | Machines are Entra-only, or the tool is published through Entra application proxy / Azure App Service | Microsoft sign-in page once, then straight in |
 | **C. Tool passwords** | Quick start, or no IT help yet | Browser password prompt |
 
@@ -46,7 +47,7 @@ plus one password login for a guest.
    Keep `HOST=127.0.0.1`: then nobody can reach Node directly and bypass IIS. The header is only
    trusted from this machine (`TRUSTED_PROXY`, default `127.0.0.1,::1`).
 8. Check: browse to `https://quest.example.local/api/me`. You should see your Windows name,
-   e.g. `{"user":"MYDOMAIN\\jay","role":"admin",...}`. If you're asked for a password instead, the
+   e.g. `{"user":"MYDOMAIN\\alice","role":"admin",...}`. If you're asked for a password instead, the
    site isn't in the browser's Local intranet zone; ask IT to add it via group policy.
 
 ### B. Entra ID
@@ -68,9 +69,9 @@ Use `password` entries in the users file (section 3) and HTTPS (`TLS_PFX`), as i
 
 ```json
 {
-  "MYDOMAIN\\jay":   { "role": "admin" },
-  "MYDOMAIN\\priya": { "role": "editor" },
-  "MYDOMAIN\\ravi":  {},
+  "MYDOMAIN\\alice":   { "role": "admin" },
+  "MYDOMAIN\\bob": { "role": "editor" },
+  "MYDOMAIN\\carol":  {},
   "*":                { "role": "viewer" },
   "pilot-guest":      { "password": "change-me", "role": "viewer" }
 }

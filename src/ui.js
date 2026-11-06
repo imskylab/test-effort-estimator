@@ -12,6 +12,8 @@ const fd = s => { if (!s) return '—'; const [y, m, d] = s.split('-'); return `
 const fdShort = s => { const [, m, d] = s.split('-'); return `${+d} ${MON[+m - 1]}`; };
 const DOWN = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
+// Name shown in the page; set per organisation (see lib/brand.js).
+const BRAND = Object.assign({ name: 'QuEST' }, typeof window !== 'undefined' && window.BRAND || {});
 const S = { db: null, dl: null, list: [], all: [], id: null, P: null, actuals: [], tab: 'summary', saving: '', rev: null,
   local: false, unsubP: null, unsubA: null, openLeaves: {}, confirmDel: false, A: null };
 
@@ -508,7 +510,7 @@ function renderMain() {
     m.innerHTML = S.loading ? `<div class="empty"><p class="muted">Loading projects…</p></div>` : `
       <div class="empty panel">
         <h1>Estimate a test project</h1>
-        <p class="muted" style="max-width:56ch">Add modules and test cases, your team and your calendar. QuEST works out effort, finish date, team needed and achievable scope, then tracks actuals week by week.</p>
+        <p class="muted" style="max-width:56ch">Add modules and test cases, your team and your calendar. ${esc(BRAND.name)} works out effort, finish date, team needed and achievable scope, then tracks actuals week by week.</p>
         <div class="row" style="justify-content:center"><button class="btn primary" data-act="new">New project</button><button class="btn" data-act="example">Open an example project</button></div>
         ${S.timeoutNote ? `<p class="small muted">${S.timeoutNote}</p>` : ''}
       </div>`;
@@ -1047,7 +1049,7 @@ function viewFactors() {
   <section class="panel"><h2>Risk range</h2>
     <div class="fields">${f('a.contingencyPct', 'Contingency buffer %', 'Added to the likely estimate')}${f('a.pertBest', 'Best case multiplier', 'Applied to the base estimate, without contingency')}${f('a.pertWorst', 'Worst case multiplier', 'Applied to the base estimate; contingency isn’t added on top')}</div>
     <p class="small muted">The status turns “At risk” when the likely finish is before the target but the worst-case finish isn’t.</p></section>
-  <section class="panel"><h2>Team sizing</h2><p class="small muted">Used when QuEST works out how many people to add.</p>
+  <section class="panel"><h2>Team sizing</h2><p class="small muted">Used when ${esc(BRAND.name)} works out how many people to add.</p>
     <div class="fields">
       ${a.levels.map(l => f(`a.teamMix.${l.key}`, `Mix: ${l.key} %`)).join('')}
       <label class="field"><span class="lbl">New hires’ tool skill</span>${sel('a.hireSkill', a.skills.map(x => x.key))}</label>
