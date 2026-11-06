@@ -212,3 +212,44 @@ test('an old db.json is moved into the database on first start', async () => {
     assert.ok(fs.existsSync(path.join(dir, 'db.json.migrated')));
   } finally { child.kill(); }
 });
+
+function usersFile(obj) { const f = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'tee-users-')), 'users.json'); fs.writeFileSync(f, JSON.stringify(obj)); return f; }
+const basic = (u, p) => ({ Authorization: 'Basic ' + Buffer.from(u + ':' + p).toString('base64') });
+
+test('Windows sign-in through a trusted front end, with roles', async () => {
+  const f = usersFile({ 'MYDOMAIN\\jay': { role: 'admin' }, 'MYDOMAIN\\ed': {}, 'MYDOMAIN\\vic': { role: 'viewer' }, alice: 'pw' });
+  const s = start({ USERS_FILE: f, AUTH_HEADER: 'X-Remote-User' }); await s.ready;
+  const as = u => ({ 'X-Remote-User': u });
+  try {
+    let me = await (await req(s.base, 'GET', '/api/me', null, as('corp\\JAY'))).json();
+    assert.deepStrictEqual([me.user, me.role], ['MYDOMAIN\\jay', 'admin'], 'names match case-insensitively');
+    assert.strictEqual((await req(s.base, 'PUT', '/api/doc/projects/p1', project('A', 'r1'), as('MYDOMAIN\\ed'))).status, 200, 'editor saves');
+    const r = await req(s.base, 'PATCH', '/api/doc/projects/p1', { name: 'X' }, as('MYDOMAIN\\vic'));
+    assert.strictEqual(r.status, 403); assert.strictEqual((await r.json()).code, 'view_only');
+    assert.strictEqual((await req(s.base, 'GET', '/api/col/projects', null, as('MYDOMAIN\\vic'))).status, 200, 'viewer reads');
+    assert.strictEqual((await req(s.base, 'DELETE', '/api/doc/projects/p1', null, as('MYDOMAIN\\ed'))).status, 403, 'editor cannot purge');
+    assert.strictEqual((await req(s.base, 'GET', '/', null, as('MYDOMAIN\\stranger'))).status, 403, 'unlisted Windows user refused');
+    assert.strictEqual((await req(s.base, 'GET', '/api/me', null, as('alice'))).status, 403, 'a password user cannot be claimed through the header');
+    assert.strictEqual((await req(s.base, 'GET', '/api/me', null, basic('alice', 'pw'))).status, 200, 'password login still works');
+    assert.strictEqual((await req(s.base, 'GET', '/api/me', null, basic('MYDOMAIN\\jay', ''))).status, 401, 'Windows users have no password login');
+    assert.strictEqual((await req(s.base, 'DELETE', '/api/doc/projects/p1', null, as('MYDOMAIN\\jay'))).status, 200, 'admin can purge');
+    assert.ok(fs.readFileSync(path.join(s.dir, 'audit.log'), 'utf8').includes('"DENIED"'));
+  } finally { s.stop(); }
+});
+
+test('the sign-in header is ignored from addresses that are not the trusted front end; * lets anyone signed in view', async () => {
+  const f = usersFile({ 'MYDOMAIN\\jay': { role: 'admin' }, '*': { role: 'viewer' } });
+  let s = start({ USERS_FILE: f, AUTH_HEADER: 'X-Remote-User', TRUSTED_PROXY: '10.9.9.9' }); await s.ready;
+  try { assert.strictEqual((await req(s.base, 'GET', '/api/me', null, { 'X-Remote-User': 'MYDOMAIN\\jay' })).status, 401); }
+  finally { s.stop(); }
+  s = start({ USERS_FILE: f, AUTH_HEADER: 'X-Remote-User' }); await s.ready;
+  try {
+    const me = await (await req(s.base, 'GET', '/api/me', null, { 'X-Remote-User': 'MYDOMAIN\\newjoiner' })).json();
+    assert.deepStrictEqual([me.user, me.role], ['MYDOMAIN\\newjoiner', 'viewer']);
+  } finally { s.stop(); }
+});
+
+test('a bad role in the users file stops the server with a clear message', async () => {
+  const s = start({ USERS_FILE: usersFile({ bob: { password: 'x', role: 'boss' } }) });
+  await assert.rejects(s.ready, /role must be viewer, editor or admin/);
+});

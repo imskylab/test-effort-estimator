@@ -94,11 +94,26 @@ Set these as environment variables before starting:
 | `PORT`       | `3000`      | Port to listen on                                                   |
 | `HOST`       | `127.0.0.1` | This machine only. Use `0.0.0.0` to share on your network (needs a login) |
 | `BASIC_AUTH` | none        | Logins: `user:password`, or several as `alice:pw1,bob:pw2`          |
-| `USERS_FILE` | none        | Path to a JSON file of logins: `{ "alice": "pw1", "bob": "pw2" }`   |
+| `USERS_FILE` | none        | Path to a JSON file of users and roles (below)                      |
+| `AUTH_HEADER` | none       | Windows / Entra sign-in through a front end such as IIS: the header carrying the signed-in user, e.g. `X-Remote-User` |
+| `TRUSTED_PROXY` | `127.0.0.1,::1` | Addresses allowed to send `AUTH_HEADER`                       |
 | `DATA_DIR`   | `./data`    | Where the database (`estimator.db`) and audit log are kept          |
 | `BACKUP_DIR` | `DATA_DIR/backups` | Where backups go. Put it on a different disk or a network share |
 | `TLS_CERT`, `TLS_KEY` | none | PEM certificate and key: serves HTTPS                         |
 | `TLS_PFX`, `TLS_PASSPHRASE` | none | Or a .pfx / .p12 certificate (common on Windows) and its password |
+
+Users file: each entry is a password, or `{ "password", "role" }`. An entry without a password is
+a Windows or Entra user, signed in by the front end. `"*"` sets the role for any other signed-in
+Windows user; without it, only listed people get in.
+
+```json
+{ "MYDOMAIN\\jay": { "role": "admin" }, "MYDOMAIN\\priya": {}, "*": { "role": "viewer" },
+  "pilot-guest": { "password": "change-me", "role": "viewer" } }
+```
+
+Roles: `viewer` can open everything and try what-ifs on screen, but nothing is saved; `editor`
+(the default) can save, log actuals, create and delete; `admin` can also delete permanently
+through the API. Setting up Windows sign-in with IIS is in [PILOT.md](PILOT.md).
 
 - The server refuses to share on the network without a login, and warns if it does so
   without HTTPS (passwords would travel unencrypted). Use HTTPS on the intranet.
@@ -134,6 +149,8 @@ Edit files in `src/`, never `public/index.html` directly: the build overwrites i
 | `server.js` | Zero-dependency Node server: static files plus a JSON document API. |
 | `lib/store.js` | SQLite storage: documents, change history, backups, migration from `db.json`. |
 | `scripts/build.js` | Assembles the two builds. |
+| `deploy/` | IIS `web.config` for Windows sign-in and an example users file. |
+| `PILOT.md` | Intranet pilot kit: setup, sign-in, quick start, scenarios, feedback. |
 | `test/` | Engine, server and browser tests (`node --test`). |
 
 The same `src/` code also runs as a claude.ai artifact, where storage and downloads come

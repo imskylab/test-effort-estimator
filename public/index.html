@@ -1273,8 +1273,11 @@ const brief = v => {
   return String(v) === '' ? 'empty' : String(v).slice(0, 40);
 };
 
+// Viewers can try what-ifs on screen, but nothing they change is written.
+const canWrite = () => S.db && !S.local && !S.viewOnly;
 async function saveNow() {
   if (!S.P || !S.id) return;
+  if (S.viewOnly) { S.saving = 'View only: changes aren’t saved'; renderHeader(); return; }
   if (S.local || !S.db) { S.saving = S.local ? 'Not saved (offline view)' : ''; const l = S.list.find(x => x.id === S.id); if (l) { l.name = S.P.name; l.client = S.P.client; } renderHeader(); return; }
   if (S.conflict) { S.saving = 'Not saved: choose a version first'; renderHeader(); return; }
   const ref = S.db.doc('projects/' + S.id);
@@ -1371,6 +1374,7 @@ function openProject(id) {
 }
 function migrate(P) { return E.migrate(P); }
 async function createProject(fromExample) {
+  if (S.viewOnly) { toast('You have view-only access, so you can’t create projects.'); return; }
   const P = fromExample ? exampleProject() : E.newProject('New project');
   const id = 'p' + Date.now().toString(36) + E.uid().slice(0, 4);
   const doc = { name: P.name, client: P.client, updatedAt: Date.now(), rev: E.uid(), data: P };
@@ -1384,6 +1388,7 @@ async function createProject(fromExample) {
 }
 async function duplicateProject() {
   if (!S.P) return;
+  if (S.viewOnly) { toast('You have view-only access, so you can’t create projects.'); return; }
   const P = JSON.parse(JSON.stringify(S.P)); P.name = P.name + ' (copy)';
   const id = 'p' + Date.now().toString(36) + E.uid().slice(0, 4);
   const doc = { name: P.name, client: P.client || '', updatedAt: Date.now(), rev: E.uid(), data: P };
@@ -1393,6 +1398,7 @@ async function duplicateProject() {
 }
 // Deletes are marks (deletedAt), so they can be undone; the server refuses saves to deleted projects.
 async function deleteProject() {
+  if (S.viewOnly) return;
   const id = S.id, name = S.P ? S.P.name : '';
   if (S.db && !S.local) {
     try { await S.db.doc('projects/' + id).update({ deletedAt: Date.now(), deletedBy: S.me || '' }); }
@@ -1405,6 +1411,7 @@ async function deleteProject() {
   if (S.list.length) openProject(S.list[0].id); else renderAll();
 }
 async function restoreProject(id) {
+  if (S.viewOnly) return;
   if (S.db && !S.local) { try { await S.db.doc('projects/' + id).update({ deletedAt: null, deletedBy: null }); } catch (e) { toast('Couldn’t restore: ' + (e.message || e.code)); return; } }
   const l = S.all.find(x => x.id === id); if (l) l.deletedAt = null;
   S.list = S.all.filter(x => !x.deletedAt);
@@ -1422,7 +1429,7 @@ function renderToast() {
 function liveActuals() { return S.actuals.filter(a => !a.deletedAt); }
 function deepMerge(t, p) { for (const [k, v] of Object.entries(p)) { if (v && typeof v === 'object' && !Array.isArray(v) && t[k] && typeof t[k] === 'object') deepMerge(t[k], v); else t[k] = v; } return t; }
 async function createActual(row) {
-  if (S.db && !S.local) {
+  if (canWrite()) {
     const { id, ...body } = row;
     const ref = S.db.doc('projects/' + S.id + '/actuals/' + id);
     try {
@@ -1459,7 +1466,7 @@ function fieldLabel(path) {
 // If a colleague changed the same field since we last saw it, ask before overwriting.
 async function patchActual(id, patch, force) {
   const r = S.actuals.find(x => x.id === id); if (!r) return;
-  if (S.db && !S.local && !force) {
+  if (canWrite() && !force) {
     try {
       const cur = await S.db.doc('projects/' + S.id + '/actuals/' + id).get();
       if (cur.exists) {
@@ -1475,7 +1482,7 @@ async function patchActual(id, patch, force) {
     } catch (e) { /* fall through and try the save */ }
   }
   deepMerge(r, JSON.parse(JSON.stringify(patch)));
-  if (S.db && !S.local) {
+  if (canWrite()) {
     try { await S.db.doc('projects/' + S.id + '/actuals/' + id).update(patch); S.actSeen = S.actSeen || {}; S.actSeen[id] = deepMerge(S.actSeen[id] || {}, JSON.parse(JSON.stringify(patch))); }
     catch (e) { if (e.code === 'deleted') { S.deletedNotice = { by: e.deletedBy, at: e.deletedAt }; renderAll(); return; } S.saving = 'Couldn’t save actuals' + (e.message ? ': ' + e.message : ''); renderHeader(); }
   } else { S.localActuals = S.localActuals || {}; S.localActuals[S.id] = S.actuals; }
@@ -1497,7 +1504,7 @@ async function deleteActual(id) {
 }
 async function deleteActualHard(id) {
   S.actuals = S.actuals.filter(x => x.id !== id);
-  if (S.db && !S.local) { try { await S.db.doc('projects/' + S.id + '/actuals/' + id).delete(); } catch (e) { } }
+  if (canWrite()) { try { await S.db.doc('projects/' + S.id + '/actuals/' + id).delete(); } catch (e) { } }
   renderSoon();
 }
 
@@ -1622,10 +1629,11 @@ function renderHeader() {
   $('#save').textContent = S.saving + (S.calculating ? (S.saving ? ' · ' : '') + 'Updating results…' : '');
   const has = !!S.P;
   $('#hdr-actions').innerHTML = `
-    ${S.all.some(x => x.deletedAt) ? `<button class="btn ghost" data-act="show-deleted">Deleted (${S.all.filter(x => x.deletedAt).length})</button>` : ''}
-    <button class="btn" data-act="new">New project</button>
-    ${has ? `<button class="btn" data-act="dup">Duplicate</button>
-    ${S.confirmDel ? `<span class="confirm">Delete this project? You can undo or restore it later. <button class="btn danger" data-act="del-yes">Delete</button><button class="btn" data-act="del-no">Cancel</button></span>` : `<button class="btn" data-act="del">Delete</button>`}
+    ${S.me && S.authOn ? `<span class="small muted" title="Signed in">${esc(S.me)}${S.viewOnly ? ' · view only' : ''}</span>` : ''}
+    ${S.viewOnly ? '' : S.all.some(x => x.deletedAt) ? `<button class="btn ghost" data-act="show-deleted">Deleted (${S.all.filter(x => x.deletedAt).length})</button>` : ''}
+    ${S.viewOnly ? '' : `<button class="btn" data-act="new">New project</button>`}
+    ${has ? `${S.viewOnly ? '' : `<button class="btn" data-act="dup">Duplicate</button>
+    ${S.confirmDel ? `<span class="confirm">Delete this project? You can undo or restore it later. <button class="btn danger" data-act="del-yes">Delete</button><button class="btn" data-act="del-no">Cancel</button></span>` : `<button class="btn" data-act="del">Delete</button>`}`}
     <button class="btn primary" data-act="xlsx" ${S.dl === false ? 'disabled title="Downloads aren’t available in this view"' : ''}>Export Excel</button>` : ''}`;
   document.querySelectorAll('nav.tabs button').forEach(b => b.setAttribute('aria-selected', b.dataset.tab === S.tab));
   $('nav.tabs').hidden = !has;
@@ -1662,7 +1670,7 @@ function renderMain() {
     return;
   }
   const tabs = { summary: viewSummary, schedule: viewSchedule, scope: viewScope, team: viewTeam, calendar: viewCalendar, factors: viewFactors, tracking: viewTracking };
-  m.innerHTML = conflictBanner() + deletedBanner() + (S.repaired ? `<div class="banner" role="status">Some settings in this project were invalid and have been reset to defaults: ${esc(S.repaired.join(', '))}. Check them on the Factors and Scope tabs. <button class="btn ghost" data-act="repaired-ok">OK</button></div>` : '') + (S.local ? `<div class="banner">Saving isn’t available in this view, so changes last only until you close the page.</div>` : '') + (S.tab !== 'summary' && S.tab !== 'tracking' && S.tab !== 'schedule' ? strip() : '') + tabs[S.tab]();
+  m.innerHTML = conflictBanner() + deletedBanner() + (S.repaired ? `<div class="banner" role="status">Some settings in this project were invalid and have been reset to defaults: ${esc(S.repaired.join(', '))}. Check them on the Factors and Scope tabs. <button class="btn ghost" data-act="repaired-ok">OK</button></div>` : '') + (S.local ? `<div class="banner">Saving isn’t available in this view, so changes last only until you close the page.</div>` : '') + (S.viewOnly ? `<div class="banner" role="status">You have view-only access. You can try changes here to see their effect, but they aren’t saved and are replaced when someone else saves. Ask the tool’s owner for editor access to make changes.</div>` : '') + (S.tab !== 'summary' && S.tab !== 'tracking' && S.tab !== 'schedule' ? strip() : '') + tabs[S.tab]();
   if (S.tab === 'summary') drawCapChart();
   if (S.tab === 'schedule') { drawGantt(); drawHeat(); }
   if (S.tab === 'tracking') drawBurnChart();
@@ -3051,7 +3059,7 @@ async function exportXlsx() {
     claude ? claude.use('downloads').catch(() => null) : null
   ]);
   S.dl = dl || false; S.db = db;
-  if (db && db.selfHosted) { try { const r = await fetch('/api/me'); if (r.ok) S.me = (await r.json()).user; } catch (e) { } }
+  if (db && db.selfHosted) { try { const r = await fetch('/api/me'); if (r.ok) { const me = await r.json(); S.me = me.user; S.role = me.role; S.authOn = me.auth; S.viewOnly = me.role === 'viewer'; } } catch (e) { } }
   if (!db) {
     S.local = true; S.loading = false;
     const P = exampleProject(); const id = 'local';

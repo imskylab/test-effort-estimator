@@ -14,15 +14,15 @@ const opts = { skip: chromium ? false : 'Playwright is not installed' };
 const SERVER = path.join(__dirname, '..', 'server.js');
 let port = 39600 + Math.floor(Math.random() * 300);
 
-async function startServer() {
+async function startServer(env = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tee-ui-'));
   const p = ++port;
-  const child = spawn(process.execPath, [SERVER], { env: { ...process.env, PORT: String(p), DATA_DIR: dir, HOST: '127.0.0.1' }, stdio: ['ignore', 'pipe', 'pipe'] });
+  const child = spawn(process.execPath, [SERVER], { env: { ...process.env, PORT: String(p), DATA_DIR: dir, HOST: '127.0.0.1', ...env }, stdio: ['ignore', 'pipe', 'pipe'] });
   await new Promise((res, rej) => { child.stdout.on('data', d => { if (String(d).includes('running at')) res(); }); child.on('exit', c => rej(new Error('exit ' + c))); });
   return { base: `http://localhost:${p}`, stop: () => child.kill() };
 }
-async function page(browser, base, errs) {
-  const ctx = await browser.newContext({ viewport: { width: 1300, height: 900 } });
+async function page(browser, base, errs, headers) {
+  const ctx = await browser.newContext({ viewport: { width: 1300, height: 900 }, extraHTTPHeaders: headers });
   await ctx.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: base });
   const pg = await ctx.newPage();
   pg.on('pageerror', e => errs.push(e.message));
@@ -181,6 +181,25 @@ test('removing a week asks first and can be undone', opts, async () => {
     assert.strictEqual(await A.evaluate(() => liveActuals().length), 0);
     await A.click('#toast [data-act=restore-week]'); await settle(A);
     assert.strictEqual(await A.evaluate(() => liveActuals().length), 1);
+    assert.deepStrictEqual(errs, []);
+  } finally { await browser.close(); srv.stop(); }
+});
+
+test('a viewer can look and try what-ifs, but nothing is saved', opts, async () => {
+  const f = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'tee-users-')), 'users.json');
+  fs.writeFileSync(f, JSON.stringify({ 'CORP\\ed': {}, 'CORP\\vic': { role: 'viewer' } }));
+  const srv = await startServer({ USERS_FILE: f, AUTH_HEADER: 'X-Remote-User' }), browser = await chromium.launch(), errs = [];
+  try {
+    const A = await page(browser, srv.base, errs, { 'X-Remote-User': 'CORP\\ed' });
+    await openExample(A);
+    const before = (await (await fetch(srv.base + '/api/col/projects', { headers: { 'X-Remote-User': 'CORP\\ed' } })).json()).docs[0].data.data.modules[0].tcs;
+    const V = await page(browser, srv.base, errs, { 'X-Remote-User': 'CORP\\vic' }); await settle(V);
+    assert.ok((await V.innerText('body')).includes('view-only access'));
+    assert.ok(!(await V.$('[data-act=del]')) && !(await V.$('header [data-act=new]')), 'no delete or new buttons');
+    await V.click('[data-tab=scope]'); await V.fill('#f-modules-0-tcs', '999'); await V.press('#f-modules-0-tcs', 'Tab'); await settle(V);
+    assert.ok((await V.innerText('#save')).includes('View only'));
+    const after = (await (await fetch(srv.base + '/api/col/projects', { headers: { 'X-Remote-User': 'CORP\\ed' } })).json()).docs[0].data.data.modules[0].tcs;
+    assert.strictEqual(after, before, 'viewer change not saved');
     assert.deepStrictEqual(errs, []);
   } finally { await browser.close(); srv.stop(); }
 });

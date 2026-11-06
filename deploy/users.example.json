@@ -1,0 +1,7 @@
+{
+  "MYDOMAIN\\jay": { "role": "admin" },
+  "MYDOMAIN\\priya": { "role": "editor" },
+  "MYDOMAIN\\ravi": {},
+  "*": { "role": "viewer" },
+  "pilot-guest": { "password": "change-me", "role": "viewer" }
+}

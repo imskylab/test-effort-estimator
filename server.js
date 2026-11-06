@@ -8,7 +8,16 @@
  *   HOST        Interface to bind (default 127.0.0.1, this machine only).
  *               Set HOST=0.0.0.0 to share on your network; a login is then required.
  *   BASIC_AUTH  Logins as "user:password" or "alice:pw1,bob:pw2"
- *   USERS_FILE  Path to a JSON file of logins: { "alice": "pw1", "bob": "pw2" }
+ *   USERS_FILE  Path to a JSON file of users. Each entry is a password, or an object:
+ *               { "alice": "pw1",
+ *                 "bob":   { "password": "pw2", "role": "viewer" },
+ *                 "MYDOMAIN\\jay": { "role": "admin" },        Windows / Entra sign-in, no password
+ *                 "*":     { "role": "viewer" } }                any other signed-in Windows user
+ *               Roles: viewer (read only), editor (default), admin (editor + permanent deletes).
+ *   AUTH_HEADER Windows / Entra sign-in through a front end (IIS with Windows Authentication,
+ *               Entra application proxy, ...): the header that carries the signed-in user,
+ *               e.g. X-Remote-User. Trusted only from TRUSTED_PROXY addresses.
+ *   TRUSTED_PROXY Addresses allowed to send AUTH_HEADER (default 127.0.0.1,::1)
  *   DATA_DIR    Folder for the database and audit log (default ./data)
  *   BACKUP_DIR  Folder for backups (default DATA_DIR/backups); put it on another disk
  *   TLS_CERT, TLS_KEY   PEM certificate and key files to serve HTTPS
@@ -30,16 +39,37 @@ const BACKUP_DIR = path.resolve(process.env.BACKUP_DIR || path.join(DATA_DIR, 'b
 const PUBLIC = path.join(__dirname, 'public');
 const MAX_BODY = 5 * 1024 * 1024;
 
-/* ---------- logins ---------- */
-const USERS = {};
-if (process.env.BASIC_AUTH) process.env.BASIC_AUTH.split(',').forEach(pair => {
-  const i = pair.indexOf(':'); if (i > 0) USERS[pair.slice(0, i).trim()] = pair.slice(i + 1);
-});
-if (process.env.USERS_FILE) {
-  try { Object.assign(USERS, JSON.parse(fs.readFileSync(process.env.USERS_FILE, 'utf8'))); }
-  catch (e) { console.error('Could not read USERS_FILE: ' + e.message); process.exit(1); }
+/* ---------- logins and roles ---------- */
+// USERS maps a lower-cased name to { name, password, role }. Names compare case-insensitively,
+// as Windows does.
+const USERS = new Map();
+const ROLES = ['viewer', 'editor', 'admin'];
+function addUser(name, v) {
+  name = String(name).trim(); if (!name) return;
+  const e = typeof v === 'string' ? { password: v } : v && typeof v === 'object' ? v : null;
+  if (!e) throw new Error(`entry for “${name}” must be a password or { "password", "role" }`);
+  const role = e.role == null ? 'editor' : String(e.role).toLowerCase();
+  if (!ROLES.includes(role)) throw new Error(`“${name}”: role must be viewer, editor or admin`);
+  if (e.password != null && typeof e.password !== 'string') throw new Error(`“${name}”: password must be text`);
+  USERS.set(name.toLowerCase(), { name, password: e.password || null, role });
 }
-const AUTH_ON = Object.keys(USERS).length > 0;
+try {
+  if (process.env.BASIC_AUTH) process.env.BASIC_AUTH.split(',').forEach(pair => {
+    const i = pair.indexOf(':'); if (i > 0) addUser(pair.slice(0, i), pair.slice(i + 1));
+  });
+  if (process.env.USERS_FILE) {
+    const j = JSON.parse(fs.readFileSync(process.env.USERS_FILE, 'utf8'));
+    if (!j || typeof j !== 'object' || Array.isArray(j)) throw new Error('it must be a JSON object of users');
+    for (const [k, v] of Object.entries(j)) addUser(k, v);
+  }
+} catch (e) { console.error('Could not read the users: ' + e.message); process.exit(1); }
+const AUTH_HEADER = (process.env.AUTH_HEADER || '').trim().toLowerCase();
+const TRUSTED_PROXY = (process.env.TRUSTED_PROXY || '127.0.0.1,::1').split(',').map(s => s.trim()).filter(Boolean);
+if (AUTH_HEADER && ![...USERS.keys()].some(k => !USERS.get(k).password)) {
+  console.error('AUTH_HEADER is set, but USERS_FILE lists nobody who signs in with Windows. Add entries such as "MYDOMAIN\\\\jay": { "role": "editor" } or "*": { "role": "viewer" }.');
+  process.exit(1);
+}
+const AUTH_ON = USERS.size > 0 || !!AUTH_HEADER;
 const LOOPBACK = ['127.0.0.1', '::1', 'localhost'].includes(HOST);
 if (!LOOPBACK && !AUTH_ON) {
   console.error(`Refusing to listen on ${HOST} without a login. Set BASIC_AUTH=user:password (or USERS_FILE), or use HOST=127.0.0.1 for this machine only.`);
@@ -49,16 +79,31 @@ if (!LOOPBACK && !AUTH_ON) {
 const FAILS = new Map();
 function throttled(ip) { const f = FAILS.get(ip); return f && f.n >= 10 && Date.now() - f.t < 15 * 60 * 1000; }
 function failed(ip) { const f = FAILS.get(ip); if (!f || Date.now() - f.t > 15 * 60 * 1000) FAILS.set(ip, { n: 1, t: Date.now() }); else f.n++; }
+const bare = ip => String(ip || '').replace(/^::ffff:/, '');
+// Windows names arrive as DOMAIN\user or user@domain; look up the exact name, then "*".
+function windowsUser(name) {
+  const e = USERS.get(name.toLowerCase());
+  if (e && !e.password) return { user: e.name, role: e.role };
+  const any = USERS.get('*');
+  if (any && !any.password) return { user: name, role: any.role };
+  return null;
+}
+// Returns { user, role }, { denied: name } for a signed-in Windows user who isn't listed, or null.
 function whoIs(req) {
-  if (!AUTH_ON) return 'local';
+  if (!AUTH_ON) return { user: 'local', role: 'admin' };
+  if (AUTH_HEADER && TRUSTED_PROXY.includes(bare(req.socket.remoteAddress))) {
+    const raw = req.headers[AUTH_HEADER];
+    const name = typeof raw === 'string' ? raw.trim() : '';
+    if (name) return windowsUser(name) || { denied: name };
+  }
   const h = req.headers.authorization || '';
   if (!h.startsWith('Basic ')) return null;
   const raw = Buffer.from(h.slice(6), 'base64').toString(), i = raw.indexOf(':');
   if (i < 0) return null;
-  const user = raw.slice(0, i), pw = Buffer.from(raw.slice(i + 1));
-  if (!Object.prototype.hasOwnProperty.call(USERS, user)) return null;
-  const want = Buffer.from(String(USERS[user]));
-  return pw.length === want.length && crypto.timingSafeEqual(pw, want) ? user : null;
+  const e = USERS.get(raw.slice(0, i).toLowerCase());
+  if (!e || !e.password) return null;
+  const pw = Buffer.from(raw.slice(i + 1)), want = Buffer.from(e.password);
+  return pw.length === want.length && crypto.timingSafeEqual(pw, want) ? { user: e.name, role: e.role } : null;
 }
 
 /* ---------- storage ---------- */
@@ -227,22 +272,25 @@ const handler = async (req, res) => {
   if (!AUTH_ON && (req.headers['x-forwarded-for'] || req.headers['forwarded'])) { res.writeHead(403, SEC); return res.end('Set up logins before putting a proxy in front of this server'); }
   const ip = req.socket.remoteAddress || '';
   if (AUTH_ON && throttled(ip)) { res.writeHead(429, { 'Retry-After': '900', ...SEC }); return res.end('Too many failed logins. Try again in 15 minutes.'); }
-  const user = whoIs(req);
-  if (!user) {
+  const who = whoIs(req);
+  if (who && who.denied) { audit(who.denied, 'DENIED', req.url.slice(0, 200)); res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8', ...SEC }); return res.end(`${who.denied} isn’t on the list of people who can use the Test Effort Estimator. Ask the tool’s owner to add you.`); }
+  if (!who) {
     if (AUTH_ON && req.headers.authorization) failed(ip);
     res.writeHead(401, { 'WWW-Authenticate': 'Basic realm="Test Effort Estimator"', ...SEC }); return res.end('Login required');
   }
+  const { user, role } = who;
   const url = new URL(req.url, 'http://x');
   let p;
   try { p = decodeURIComponent(url.pathname); } catch (e) { return send(res, 400, { code: 'invalid_argument', message: 'Bad path' }); }
   try {
-    if (p === '/api/me') return send(res, 200, { user, auth: AUTH_ON });
+    if (p === '/api/me') return send(res, 200, { user, role, auth: AUTH_ON });
     if (p === '/api/health') return send(res, 200, { ok: true });
     if (p.startsWith('/api/doc/')) {
       const key = parsePath(p.slice(9), true);
       if (!key) return send(res, 400, { code: 'invalid_argument', message: 'Bad document path' });
       if (req.method === 'GET') { const d = store.get(key); return d ? send(res, 200, { id: key.split('/').pop(), data: d }) : send(res, 404, { code: 'not_found' }); }
       if (!writable(key)) return send(res, 403, { code: 'invalid_argument', message: 'Only projects and their weekly actuals can be saved' });
+      if (role === 'viewer') return send(res, 403, { code: 'view_only', message: 'You have view-only access, so changes aren’t saved' });
       const segs = key.split('/');
       if (req.method === 'PUT' || req.method === 'PATCH') {
         const body = await jsonBody(req, res); if (!body) return;
@@ -276,6 +324,7 @@ const handler = async (req, res) => {
         return send(res, result[0], result[1]);
       }
       if (req.method === 'DELETE') {
+        if (role !== 'admin') return send(res, 403, { code: 'invalid_argument', message: 'Only admins can delete permanently. Delete marks it instead, so it can be restored.' });
         // Permanent removal. The page deletes by marking (deletedAt) so it can be undone.
         store.tx(() => store.remove(key, user)); audit(user, 'PURGE', key);
         return send(res, 200, { ok: true });
@@ -321,7 +370,8 @@ if (require.main === module) {
     console.log(`Test Effort Estimator running at ${where}`);
     console.log(`Database: ${store.file}; backups: ${BACKUP_DIR}; changes are logged to ${AUDIT_FILE}`);
     if (!LOOPBACK && !tls) console.log('Warning: not using HTTPS, so logins travel unencrypted. Set TLS_CERT/TLS_KEY or TLS_PFX.');
-    console.log(AUTH_ON ? `Logins: ${Object.keys(USERS).join(', ')}` : 'No login set (fine for this machine only).');
+    if (AUTH_HEADER) console.log(`Windows sign-in: trusting the ${AUTH_HEADER} header from ${TRUSTED_PROXY.join(', ')}`);
+    console.log(AUTH_ON ? `Users: ${[...USERS.values()].map(u => `${u.name} (${u.role}${u.password ? '' : ', Windows'})`).join(', ') || 'none listed'}` : 'No login set (fine for this machine only).');
   });
   const shutdown = () => { server.close(); try { store.close(); } catch (e) { } process.exit(0); };
   process.on('SIGINT', shutdown); process.on('SIGTERM', shutdown);
