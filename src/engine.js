@@ -8,6 +8,11 @@ const ENGINE = (() => {
   const daysBetween = (a, b) => Math.round((toD(b) - toD(a)) / DAY);
   const mondayOf = s => addDays(s, -((dow(s) + 6) % 7));
   const uid = () => Math.random().toString(36).slice(2, 10);
+  const isObj = v => v !== null && typeof v === 'object' && !Array.isArray(v);
+  const realDate = s => typeof s === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(s) && toS(toD(s)) === s;
+  // Ids reach HTML attributes (data-id, element ids) and are matched between plans and actuals.
+  const SAFE_ID = /^[A-Za-z0-9_-]{1,64}$/;
+  const freshId = used => { let id; do { id = uid(); } while (used.has(id)); return id; };
 
   function defaults() {
     return {
@@ -153,6 +158,11 @@ const ENGINE = (() => {
   const PHASE_BY_ID = { ot1: 'start', ot2: 'start', ot3: 'framework', ot4: 'cicd', ot5: 'cicd', ot6: 'start', ot7: 'start', ot8: 'end', ot9: 'common' };
   const PHASES = ['start', 'framework', 'common', 'cicd', 'end'];
 
+  // A frozen plan (baseline) must keep the shape compactPlan gives it, or tracking can't read it.
+  const planOk = b => isObj(b) && isObj(b.weeks) && Object.values(b.weeks).every(isObj) &&
+    isObj(b.W) && Array.isArray(b.W.mods) && b.W.mods.every(m => isObj(m) && typeof m.id === 'string') &&
+    typeof b.W.V === 'number' && isFinite(b.W.V);
+
   // Bring a saved project up to the current data shape.
   function migrate(P) {
     const needsV13 = !(P.a && P.a.v13);
@@ -177,16 +187,22 @@ const ENGINE = (() => {
     if (!Array.isArray(P.team)) { P.team = []; repaired.push('team'); }
     if (!Array.isArray(P.holidays)) { P.holidays = []; repaired.push('holidays'); }
     P.modules = P.modules.filter(m => m && typeof m === 'object');
+    const moduleIds = new Set();
     P.modules.forEach(m => {
-      if (typeof m.id !== 'string') m.id = uid();
+      if (typeof m.id !== 'string' || !SAFE_ID.test(m.id) || moduleIds.has(m.id)) { m.id = freshId(moduleIds); repaired.push(`id of ${m.name || 'a module'}`); }
+      moduleIds.add(m.id);
       if (!(typeof m.tcs === 'number' && m.tcs >= 0)) { m.tcs = 0; repaired.push(`test cases of ${m.name || 'a module'}`); }
       if (!m.mix || typeof m.mix !== 'object') { m.mix = { S: 30, M: 40, C: 20, V: 10 }; repaired.push(`mix of ${m.name || 'a module'}`); }
     });
     P.team = P.team.filter(r => r && typeof r === 'object');
-    P.team.forEach(r => { if (typeof r.id !== 'string') r.id = uid(); if (!(typeof r.alloc === 'number' && r.alloc >= 0)) r.alloc = 100; });
+    const teamIds = new Set();
+    P.team.forEach(r => {
+      if (typeof r.id !== 'string' || !SAFE_ID.test(r.id) || teamIds.has(r.id)) { r.id = freshId(teamIds); repaired.push(`id of ${r.name || 'a team member'}`); }
+      teamIds.add(r.id);
+      if (!(typeof r.alloc === 'number' && r.alloc >= 0)) r.alloc = 100;
+    });
     if (typeof P.start !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(P.start) || isNaN(toD(P.start))) { P.start = addDays(mondayOf(toS(Date.now())), 7); repaired.push('start date'); }
     if (P.end && (typeof P.end !== 'string' || isNaN(toD(P.end)))) { P.end = ''; repaired.push('target date'); }
-    if (repaired.length) Object.defineProperty(P, '_repaired', { value: repaired, enumerable: false, configurable: true });
     P.a = Object.assign(defaults(), P.a || {});
     P.a.oneTime.forEach(o => { if (!o.phase) o.phase = PHASE_BY_ID[o.id] || (o.pool === 'auto' ? 'framework' : 'start'); delete o.pool; });
     // v1.3: CI/CD and reporting no longer block scripting; common methods are their own step
@@ -198,13 +214,23 @@ const ENGINE = (() => {
       }
       P.a.v13 = true;
     }
-    P.locations = P.locations || ['India', 'USA'];
-    P.downtimes = P.downtimes || []; P.holidays = P.holidays || [];
+    if (!Array.isArray(P.locations) || P.locations.some(x => typeof x !== 'string')) { P.locations = ['India', 'USA']; repaired.push('locations'); }
+    P.locations = P.locations.slice(0, 50);
+    if (!Array.isArray(P.downtimes)) { P.downtimes = []; repaired.push('downtimes'); }
+    P.downtimes = P.downtimes.filter(x => isObj(x) && (!x.from || realDate(x.from)) && (!x.to || realDate(x.to)) &&
+      (x.impact == null || (typeof x.impact === 'number' && isFinite(x.impact)))).slice(0, 1000);
+    if (!Array.isArray(P.holidays)) P.holidays = [];
+    // A damaged baseline would break every tracking screen: measure against the current plan instead.
+    if (P.baseline != null && !planOk(P.baseline)) { P.baseline = null; repaired.push('baseline'); }
+    if (P.baselineHistory != null && !Array.isArray(P.baselineHistory)) { P.baselineHistory = []; repaired.push('baseline history'); }
+    if (Array.isArray(P.baselineHistory)) P.baselineHistory = P.baselineHistory
+      .filter(h => isObj(h) && realDate(h.at) && (h.reason == null || typeof h.reason === 'string')).slice(0, 1000);
     P.modules.forEach((m, i) => { if (m.priority == null) m.priority = i + 1; if (m.availableFrom == null) m.availableFrom = ''; });
     P.team.forEach(r => r.leaves = r.leaves || []);
     // v1.5: CI/CD is new, existing or not needed
     if (P.a.cicdExists != null) { if (P.a.cicdMode === 'new' && P.a.cicdExists) P.a.cicdMode = 'existing'; delete P.a.cicdExists; }
     P.notes = Object.assign({ drivers: '', excluded: '', confirm: '', sender: '' }, P.notes || {});
+    if (repaired.length) Object.defineProperty(P, '_repaired', { value: repaired, enumerable: false, configurable: true });
     return P;
   }
 
@@ -322,21 +348,23 @@ const ENGINE = (() => {
       const dtf = downtimeFactor(p, d);
       const hrs = team.map((r, k) => {
         const m = models[k];
+        // Accumulate on the team total and on this person, so a role breakdown can be shown.
+        const add = (key, v) => { if (!ded) return; ded[key] += v; if (ded.people) ded.people[k][key] += v; };
         if (!wd || d < m.start || d > m.end) return 0;
         const alloc = pct100(r.alloc) / 100;
         const gross = hpd * alloc;
-        if (ded) ded.gross += gross;
-        if ((hs[r.location] || new Set()).has(d)) { if (ded) ded.holidays += gross; return 0; }
-        if (onLeave(r, d)) { if (ded) ded.leave += gross; return 0; }
+        add('gross', gross);
+        if ((hs[r.location] || new Set()).has(d)) { add('holidays', gross); return 0; }
+        if (onLeave(r, d)) { add('leave', gross); return 0; }
         let h = gross;
-        const nd = h * m.role.nonDevPct / 100; h -= nd; if (ded) ded.nonDev += nd;
-        const ul = h * a.unplannedLeavePct / 100; h -= ul; if (ded) ded.unplanned += ul;
-        const dt = h * (1 - (1 - a.downtimePct / 100) * dtf); h -= dt; if (ded) ded.downtime += dt;
+        const nd = h * m.role.nonDevPct / 100; h -= nd; add('nonDev', nd);
+        const ul = h * a.unplannedLeavePct / 100; h -= ul; add('unplanned', ul);
+        const dt = h * (1 - (1 - a.downtimePct / 100) * dtf); h -= dt; add('downtime', dt);
         const rampF = m.worked < m.ramp ? (a.rampStartPct / 100) + (1 - a.rampStartPct / 100) * (m.worked / m.ramp) : 1;
         m.worked++;
-        const rp = h * (1 - rampF); h -= rp; if (ded) ded.ramp += rp;
+        const rp = h * (1 - rampF); h -= rp; add('ramp', rp);
         const prod = m.lvl.productivity * m.sk.factor;
-        const pd = h * (prod - 1); h += pd; if (ded) ded.productivity += pd;
+        const pd = h * (prod - 1); h += pd; add('productivity', pd);
         return h;
       });
       if (cb(d, hrs) === false) return d;
@@ -346,7 +374,9 @@ const ENGINE = (() => {
   }
 
   function capacityIn(p, team, start, end) {
-    const ded = { gross: 0, holidays: 0, leave: 0, nonDev: 0, unplanned: 0, downtime: 0, ramp: 0, productivity: 0 };
+    const zero = () => ({ gross: 0, holidays: 0, leave: 0, nonDev: 0, unplanned: 0, downtime: 0, ramp: 0, productivity: 0 });
+    const ded = zero();
+    ded.people = team.map(zero);
     let A = 0, M = 0, B = 0;
     const per = team.map(() => 0);
     const curve = []; let cum = 0;
@@ -354,7 +384,7 @@ const ENGINE = (() => {
       hrs.forEach((h, i) => { per[i] += h; const k = poolOf(team[i]); if (k === 'A') A += h; else if (k === 'M') M += h; else B += h; cum += h; });
       curve.push([d, cum]);
     }, { ded });
-    return { A, M, B, total: A + M + B, per, ded, curve };
+    return { A, M, B, total: A + B + M, per, ded, perDed: ded.people, curve };
   }
 
   function hireProfiles(p) {

@@ -144,7 +144,13 @@ test('without logins, requests for other host names are refused', async () => {
   const s = start({}); await s.ready;
   try {
     const http = require('node:http');
-    const status = await new Promise(res => http.get(s.base + '/api/health', { headers: { Host: 'evil.example.com' } }, r => res(r.statusCode)));
+    const status = await new Promise((resolve, reject) => {
+      const r = http.get(s.base + '/api/health', { headers: { Host: 'evil.example.com' } }, res => {
+        res.resume();
+        res.on('end', () => resolve(res.statusCode));
+      });
+      r.on('error', reject);
+    });
     assert.strictEqual(status, 403);
   } finally { s.stop(); }
 });
@@ -255,7 +261,9 @@ test('a bad role in the users file stops the server with a clear message', async
 });
 
 test('the tool name is set per organisation and escaped; the default is neutral', async () => {
-  let s = start({ BRAND_FILE: '' }); await s.ready;
+  const empty = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'tee-brand-')), 'brand.json');
+  fs.writeFileSync(empty, '{}');
+  let s = start({ BRAND_FILE: empty }); await s.ready;
   try {
     const html = await (await fetch(s.base + '/')).text();
     assert.ok(html.includes('<title>QuEST · Quality Estimation &amp; Scheduling Tool</title>'));
@@ -273,4 +281,62 @@ test('the tool name is set per organisation and escaped; the default is neutral'
   fs.writeFileSync(f, JSON.stringify({ name: 'x', colour: 'red' }));
   s = start({ BRAND_FILE: f });
   await assert.rejects(s.ready, /unknown setting "colour"/);
+});
+
+/* ---------- review fixes: purge, ids, weeks and baselines ---------- */
+test('purging a project removes its actuals and leaves similar names alone', async () => {
+  const s = start({}); await s.ready;
+  try {
+    await req(s.base, 'PUT', '/api/doc/projects/a_b', project('Underscore', 'r1'));
+    await req(s.base, 'PUT', '/api/doc/projects/axb', project('Similar', 'r1'));
+    await req(s.base, 'PUT', '/api/doc/projects/a_b/actuals/2026-11-16', { week: '2026-11-16', mods: { m1: { designed: 5 } } });
+    assert.strictEqual((await req(s.base, 'DELETE', '/api/doc/projects/a_b')).status, 200);
+    assert.strictEqual((await req(s.base, 'GET', '/api/doc/projects/a_b')).status, 404);
+    assert.strictEqual((await req(s.base, 'GET', '/api/doc/projects/a_b/actuals/2026-11-16')).status, 404, 'its weeks go with it');
+    assert.strictEqual((await req(s.base, 'GET', '/api/doc/projects/axb')).status, 200, 'a similar name is untouched');
+  } finally { s.stop(); }
+});
+
+test('module and team ids must be safe and unique', async () => {
+  const s = start({}); await s.ready;
+  try {
+    const P = project('A', 'r1');
+    const put = async data => (await req(s.base, 'PUT', '/api/doc/projects/x', { ...P, data: { ...P.data, ...data } })).status;
+    assert.strictEqual(await put({ modules: [{ id: 'm 1', tcs: 5, mix: {} }] }), 400, 'a space in an id');
+    assert.strictEqual(await put({ modules: [{ id: 'm"1', tcs: 5, mix: {} }] }), 400, 'a quote in an id');
+    assert.strictEqual(await put({ modules: [{ id: 'm1', tcs: 5, mix: {} }, { id: 'm1', tcs: 5, mix: {} }] }), 400, 'duplicate module ids');
+    assert.strictEqual(await put({ team: [{ id: 'bad id', alloc: 100 }] }), 400, 'a space in a team id');
+    assert.strictEqual(await put({ team: [{ id: 'lead0', alloc: 100 }] }), 200, 'safe ids are accepted');
+  } finally { s.stop(); }
+});
+
+test('damaged baselines, locations and downtimes are refused', async () => {
+  const s = start({}); await s.ready;
+  try {
+    const P = project('A', 'r1');
+    const put = async data => (await req(s.base, 'PUT', '/api/doc/projects/x', { ...P, data: { ...P.data, ...data } })).status;
+    assert.strictEqual(await put({ locations: 'India' }), 400);
+    assert.strictEqual(await put({ downtimes: 'later' }), 400);
+    assert.strictEqual(await put({ baseline: 'oops' }), 400);
+    assert.strictEqual(await put({ baseline: { W: {}, weeks: {} } }), 400, 'a snapshot without weights');
+    assert.strictEqual(await put({ baselineHistory: [{ at: 'yesterday' }] }), 400);
+    assert.strictEqual(await put({ locations: ['India', 'USA'], baselineHistory: [{ at: '2026-11-02', reason: 'agreed' }] }), 200);
+  } finally { s.stop(); }
+});
+
+test('weekly actuals must be a Monday matching their address', async () => {
+  const s = start({}); await s.ready;
+  try {
+    await req(s.base, 'PUT', '/api/doc/projects/p', project('P', 'r1'));
+    const put = (day, body) => req(s.base, 'PUT', '/api/doc/projects/p/actuals/' + day, body);
+    assert.strictEqual((await put('2026-11-17', { week: '2026-11-17' })).status, 400, 'Tuesday is not a week start');
+    assert.strictEqual((await put('2026-11-16', { week: '2026-11-23' })).status, 400, 'the week must match the address');
+    assert.strictEqual((await put('2026-11-16', { mods: {} })).status, 200, 'the address supplies the week');
+    const d = await (await req(s.base, 'GET', '/api/doc/projects/p/actuals/2026-11-16')).json();
+    assert.strictEqual(d.data.week, '2026-11-16');
+    assert.strictEqual((await req(s.base, 'PATCH', '/api/doc/projects/p/actuals/2026-11-16', { week: '2026-11-23' })).status, 400);
+    assert.strictEqual((await req(s.base, 'PATCH', '/api/doc/projects/p/actuals/2026-11-16', { week: null, notes: 'kept' })).status, 200);
+    const d2 = await (await req(s.base, 'GET', '/api/doc/projects/p/actuals/2026-11-16')).json();
+    assert.strictEqual(d2.data.week, '2026-11-16', 'a patch cannot unbind the week');
+  } finally { s.stop(); }
 });

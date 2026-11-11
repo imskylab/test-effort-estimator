@@ -149,6 +149,9 @@ function clean(v) {
   return out;
 }
 const realDate = s => { if (typeof s !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(s)) return false; const t = Date.parse(s + 'T00:00:00Z'); return !isNaN(t) && new Date(t).toISOString().slice(0, 10) === s; };
+const isMonday = s => realDate(s) && new Date(s + 'T00:00:00Z').getUTCDay() === 1;
+// Ids end up in paths and in HTML attributes (data-id, element ids), so keep them boring.
+const SAFE_ID = /^[A-Za-z0-9_-]{1,64}$/;
 const num = (v, lo, hi) => typeof v === 'number' && isFinite(v) && v >= lo && v <= hi;
 const optNum = (v, lo, hi) => v == null || v === '' || num(v, lo, hi);
 const str = (v, max) => v == null || (typeof v === 'string' && v.length <= max);
@@ -170,24 +173,41 @@ function validate(key, body) {
     if (!isObj(d.a)) return 'Project data needs its factors';
     const fe = validateFactors(d.a); if (fe) return fe;
     if (d.modules.length > 500 || d.team.length > 500 || d.holidays.length > 5000) return 'Too many modules, people or holidays';
+    const ids = new Set();
     for (const m of d.modules) {
-      if (!isObj(m) || typeof m.id !== 'string') return 'Every module needs an id';
+      if (!isObj(m) || typeof m.id !== 'string' || !SAFE_ID.test(m.id)) return 'Every module needs an id of letters, digits, - or _ (up to 64)';
+      if (ids.has(m.id)) return 'Module ids must be unique';
+      ids.add(m.id);
       if (!str(m.name, 300)) return 'Module names must be text';
       if (!num(m.tcs, 0, 1e6)) return `Module “${m.name}”: test cases must be a number from 0 to 1,000,000`;
       if (!isObj(m.mix) || Object.values(m.mix).some(v => !optNum(v, 0, 100))) return `Module “${m.name}”: complexity mix must be percentages from 0 to 100`;
       if (!optNum(m.autoPct, 0, 100)) return `Module “${m.name}”: % to automate must be 0 to 100`;
       if (m.availableFrom && !realDate(m.availableFrom)) return `Module “${m.name}”: available-from must be a real date`;
     }
+    const teamIds = new Set();
     for (const r of d.team) {
       if (!isObj(r)) return 'Team entries must be objects';
+      if (typeof r.id !== 'string' || !SAFE_ID.test(r.id)) return 'Every team member needs an id of letters, digits, - or _ (up to 64)';
+      if (teamIds.has(r.id)) return 'Team member ids must be unique';
+      teamIds.add(r.id);
       if (!optNum(r.alloc, 0, 100)) return `${r.name || 'A team member'}: allocation must be 0 to 100%`;
       if ((r.start && !realDate(r.start)) || (r.end && !realDate(r.end))) return `${r.name || 'A team member'}: dates must be real dates`;
       if (r.leaves && (!Array.isArray(r.leaves) || r.leaves.some(l => !isObj(l) || (l.from && !realDate(l.from)) || (l.to && !realDate(l.to))))) return `${r.name || 'A team member'}: leave dates must be real dates`;
     }
     if (d.holidays.some(h => !isObj(h) || !realDate(h.date) || !str(h.name, 200))) return 'Every holiday needs a real date and a name';
+    if (d.locations != null && (!Array.isArray(d.locations) || d.locations.length > 50 || d.locations.some(x => typeof x !== 'string' || x.length > 100))) return 'Locations must be a list of place names';
+    if (d.downtimes != null && (!Array.isArray(d.downtimes) || d.downtimes.length > 1000 || d.downtimes.some(x => !isObj(x) || (x.from && !realDate(x.from)) || (x.to && !realDate(x.to)) || !optNum(x.impact, 0, 100)))) return 'Downtime entries need real dates and an impact of 0 to 100%';
+    if (d.baseline != null) {
+      const b = d.baseline;
+      if (!isObj(b) || !isObj(b.weeks) || !isObj(b.W) || !Array.isArray(b.W.mods) || !num(b.W.V, 0, 1e12) || !num(b.total, 0, 1e12)) return 'Baseline must be a saved plan snapshot';
+      if (b.at != null && !realDate(b.at)) return 'Baseline date must be a real date';
+    }
+    if (d.baselineHistory != null && (!Array.isArray(d.baselineHistory) || d.baselineHistory.length > 1000 || d.baselineHistory.some(h => !isObj(h) || !realDate(h.at) || !str(h.reason, 2000)))) return 'Baseline history must be a list of dated entries';
   }
   if (segs.length === 4) {
-    if (body.week != null && !realDate(body.week)) return 'Week must be a real date (YYYY-MM-DD)';
+    const week = segs[3];
+    if (!isMonday(week)) return 'Week must be the Monday that starts it (YYYY-MM-DD)';
+    if (body.week != null && body.week !== week) return 'Week must match the date in the address';
     if (!optNum(body.hours, 0, 1e6)) return 'Hours must be 0 or more';
     if (body.hoursBy != null && (!isObj(body.hoursBy) || Object.values(body.hoursBy).some(v => !optNum(v, 0, 200)))) return 'Hours per person must be 0 to 200 a week';
     if (!str(body.notes, 20000) || !str(body.blockers, 20000)) return 'Notes are too long';
@@ -306,6 +326,7 @@ const handler = async (req, res) => {
             if (!cur) return [404, { code: 'invalid_argument', message: 'Document does not exist' }];
             if (cur.deletedAt && !('deletedAt' in body)) return [410, { code: 'deleted', message: 'This has been deleted', deletedBy: cur.deletedBy, deletedAt: cur.deletedAt }];
             const next = deepMerge(JSON.parse(JSON.stringify(cur)), body);
+            if (segs.length === 4 && next.week == null) next.week = segs[3];
             if ('deletedAt' in body) next.deletedBy = body.deletedAt ? user : null;
             const err = validate(key, next); if (err) return [400, { code: 'invalid_argument', message: err }];
             next.updatedBy = user;
@@ -319,6 +340,7 @@ const handler = async (req, res) => {
           if (createOnly && cur && !cur.deletedAt) return [409, { code: 'exists', message: 'Already exists', current: cur }];
           if (cur && cur.deletedAt && !restore && !createOnly) return [410, { code: 'deleted', message: 'This has been deleted', deletedBy: cur.deletedBy, deletedAt: cur.deletedAt, current: cur }];
           if (prevRev !== undefined && cur && !cur.deletedAt && cur.rev !== undefined && cur.rev !== prevRev) return [409, { code: 'conflict', message: 'Someone else saved this first', current: cur }];
+          if (segs.length === 4 && body.week == null) body.week = segs[3];
           const err = validate(key, body); if (err) return [400, { code: 'invalid_argument', message: err }];
           body.updatedBy = user; delete body.deletedAt; delete body.deletedBy;
           store.put(key, body, user, restore ? 'RESTORE' : 'PUT');

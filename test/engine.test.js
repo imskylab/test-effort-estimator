@@ -434,3 +434,56 @@ test('invalid saved settings are repaired on load instead of breaking the page',
   assert.ok(p._repaired.includes('complexity'));
   assert.ok(E.analyse(p).e.total >= 0);
 });
+
+test('unsafe and duplicate ids are repaired on load', () => {
+  const p = project();
+  const bad = 'x" onload="y';
+  p.modules = [Object.assign(E.newModule('A', 1), { id: bad }), Object.assign(E.newModule('B', 2), { id: bad })];
+  p.team = [Object.assign(E.newResource(1), { id: bad }), Object.assign(E.newResource(2), { id: bad })];
+  E.migrate(p);
+  const ids = p.modules.concat(p.team).map(x => x.id);
+  assert.ok(ids.every(id => /^[A-Za-z0-9_-]{1,64}$/.test(id)), ids.join(', '));
+  assert.strictEqual(new Set(ids).size, ids.length, 'ids stay unique');
+  assert.strictEqual(p._repaired.filter(x => /^id of /.test(x)).length, 4);
+});
+
+test('a damaged baseline is dropped, so tracking falls back to the current plan', () => {
+  const p = trackedProject();
+  p.baseline = { W: 'nope', weeks: null, total: 'x' };
+  p.baselineHistory = 'nope';
+  p.locations = { India: true };
+  p.downtimes = [{ from: 'not-a-date' }, 'nope', { from: '2026-12-01', to: '2026-12-02', impact: 50 }];
+  E.migrate(p);
+  assert.strictEqual(p.baseline, null);
+  assert.deepStrictEqual(p.baselineHistory, []);
+  assert.deepStrictEqual(p.locations, ['India', 'USA']);
+  assert.deepStrictEqual(p.downtimes, [{ from: '2026-12-01', to: '2026-12-02', impact: 50 }]);
+  assert.ok(p._repaired.includes('baseline') && p._repaired.includes('locations') && p._repaired.includes('baseline history'));
+  assert.ok(E.tracking(p, [{ week: '2026-11-16', hours: 100 }]).rows[0], 'tracking still works');
+});
+
+test('a valid baseline survives migration', () => {
+  const p = trackedProject();
+  p.baseline = E.makeBaseline(p, E.schedule(p), 'agreed');
+  p.baselineHistory = [{ at: '2026-11-02', reason: 'agreed' }];
+  E.migrate(p);
+  assert.ok(p.baseline && p.baseline.weeks && Array.isArray(p.baseline.W.mods));
+  assert.strictEqual(p.baselineHistory.length, 1);
+});
+
+test('capacity deductions are kept per person and reconcile with the total', () => {
+  const p = exampleTeam(project({ end: '2027-06-30' }));
+  const c = E.capacityIn(p, p.team, p.start, p.end);
+  const keys = ['gross', 'holidays', 'leave', 'nonDev', 'unplanned', 'downtime', 'ramp', 'productivity'];
+  assert.strictEqual(c.perDed.length, p.team.length);
+  keys.forEach(k => {
+    const sum = c.perDed.reduce((t, d) => t + d[k], 0);
+    assert.ok(Math.abs(sum - c.ded[k]) < 1e-6, `${k}: ${sum} vs ${c.ded[k]}`);
+  });
+  const productive = d => d.gross - d.holidays - d.leave - d.nonDev - d.unplanned - d.downtime - d.ramp + d.productivity;
+  const sum = c.perDed.reduce((t, d) => t + productive(d), 0);
+  assert.ok(Math.abs(sum - c.total) < 1e-6, `productive hours ${sum} vs ${c.total}`);
+  const lead = p.team.findIndex(r => r.role === 'Lead');
+  const engineer = p.team.findIndex(r => r.role === 'Engineer');
+  assert.ok(c.perDed[lead].nonDev > c.perDed[engineer].nonDev, 'lead coordination exceeds engineer meetings');
+});

@@ -487,7 +487,7 @@ function renderAll() {
   if (aid) { const el = document.getElementById(aid); if (el && el !== document.activeElement) { el.focus({ preventScroll: true }); try { if (selS != null) el.setSelectionRange(selS, selE); } catch (e) { } } }
 }
 function renderHeader() {
-  const opts = S.list.map(x => `<option value="${x.id}" ${x.id === S.id ? 'selected' : ''}>${esc(x.id === S.id && S.P ? S.P.name : x.name)}</option>`).join('');
+  const opts = S.list.map(x => `<option value="${esc(x.id)}" ${x.id === S.id ? 'selected' : ''}>${esc(x.id === S.id && S.P ? S.P.name : x.name)}</option>`).join('');
   $('#hdr-proj').innerHTML = S.list.length ? `<select id="proj-pick" class="sel-proj" aria-label="Project">${opts}</select>` : '';
   $('#save').textContent = S.saving + (S.calculating ? (S.saving ? ' · ' : '') + 'Updating results…' : '');
   const has = !!S.P;
@@ -566,6 +566,13 @@ function missingMsg(m) {
 const FTE = n => nf1.format(Math.round(n * 10) / 10);
 const nf2 = new Intl.NumberFormat('en-US', { maximumFractionDigits: 2 });
 const r10 = h => nf0.format(Math.round((h || 0) / 10) * 10);
+const NONDEV_LABEL = {
+  Engineer: p => `Meetings and other non-development time (${nf1.format(p)}%)`,
+  Lead: p => `Lead coordination: planning, status reports, client calls, reviews (${nf1.format(p)}%)`,
+  Manager: p => `Management and coordination (${nf1.format(p)}%)`
+};
+const nonDevLabel = (role, p) => (NONDEV_LABEL[role] || (x => `${role} non-development time (${nf1.format(x)}%)`))(p);
+const signedH = (h, plus) => h == null ? '—' : `${plus && h > 0 ? '+' : ''}${h < 0 ? '−' : ''}${H(Math.abs(h))}`;
 const plural = (n, one, many) => `${nf0.format(n)} ${n === 1 ? one : many}`;
 const calDays = (s, d) => E.daysBetween(s, d) + 1;
 function workDaysBetween(P, s, d) { let n = 0; for (let x = s; x <= d; x = E.addDays(x, 1)) if (P.a.workDays.includes(E.dow(x))) n++; return n; }
@@ -662,19 +669,45 @@ function summaryModel(A) {
   M.total = e.total; M.best = e.best; M.worst = e.worst;
   M.teamTime = A.teamTime || null; M.needTeamTime = A.need && A.need.teamTime || null;
 
-  // capacity
+  // capacity: one column per role (per full-time person) plus the whole team
   const w = A.window;
   if (w && A.hasTeam && fte > 0) {
     const until = P.end || fl, d = w.ded;
     const wd = workDaysBetween(P, P.start, until);
-    M.capUntil = until;
-    M.cap = [
-      [`Working hours (${wd} days × ${a.hoursPerDay} h)`, d.gross], ['Public holidays', -d.holidays], ['Planned leave', -d.leave],
-      ['Meetings, reporting and other non-development time', -d.nonDev], [`Unplanned leave (${a.unplannedLeavePct}%)`, -d.unplanned],
-      [`Downtime: environment, builds or access (${a.downtimePct}%)`, -d.downtime], ['Ramp-up and learning curve', -d.ramp],
-      ['Experience and skill adjustment', d.productivity]
-    ].filter(x => Math.abs(x[1]) > 0.5);
-    M.capTotal = w.total; M.capPct = d.gross ? w.total / d.gross : 0;
+    const zero = () => ({ gross: 0, holidays: 0, leave: 0, nonDev: 0, unplanned: 0, downtime: 0, ramp: 0, productivity: 0 });
+    const groups = new Map();
+    P.team.forEach((r, i) => {
+      const role = a.roles.find(x => x.key === r.role) || { key: r.role || 'Engineer', nonDevPct: 0 };
+      if (!groups.has(role.key)) groups.set(role.key, { key: role.key, fte: 0, nonDevPct: +role.nonDevPct || 0, ded: zero() });
+      const g = groups.get(role.key);
+      g.fte += (+r.alloc || 0) / 100;
+      const pd = (w.perDed && w.perDed[i]) || zero();
+      Object.keys(g.ded).forEach(k => { g.ded[k] += pd[k]; });
+    });
+    const cols = [...groups.values()].filter(g => g.fte > 1e-9).map(g => {
+      const per = {};
+      Object.keys(g.ded).forEach(k => { per[k] = g.ded[k] / g.fte; });
+      per.total = per.gross - per.holidays - per.leave - per.nonDev - per.unplanned - per.downtime - per.ramp + per.productivity;
+      return { ...g, per };
+    });
+    const roleOrder = k => { const i = a.roles.findIndex(x => x.key === k); return i < 0 ? 99 : i; };
+    cols.sort((x, y) => roleOrder(x.key) - roleOrder(y.key));
+    const rows = [
+      { label: `Working hours (${wd} days × ${a.hoursPerDay} h)`, vals: cols.map(c => c.per.gross), total: d.gross, plain: true },
+      { label: 'Public holidays', vals: cols.map(c => -c.per.holidays), total: -d.holidays }
+    ];
+    if (d.leave > 0.5) rows.push({ label: 'Planned leave', vals: cols.map(c => -c.per.leave), total: -d.leave });
+    cols.filter(c => c.nonDevPct > 0).forEach(c => rows.push({
+      label: nonDevLabel(c.key, c.nonDevPct), vals: cols.map(x => x.key === c.key ? -c.per.nonDev : null), total: -c.ded.nonDev
+    }));
+    rows.push(
+      { label: `Unplanned leave (${a.unplannedLeavePct}%)`, vals: cols.map(c => -c.per.unplanned), total: -d.unplanned },
+      { label: `Downtime: environment, builds or access (${a.downtimePct}%)`, vals: cols.map(c => -c.per.downtime), total: -d.downtime },
+      { label: 'Ramp-up and learning curve', vals: cols.map(c => -c.per.ramp), total: -d.ramp }
+    );
+    if (Math.abs(d.productivity) > 0.5) rows.push({ label: 'Experience and skill adjustment', vals: cols.map(c => c.per.productivity), total: d.productivity });
+    M.cap = { wd, fte, cols, rows, until, total: w.total, pct: d.gross ? w.total / d.gross : 0 };
+    M.capUntil = until; M.capTotal = w.total; M.capPct = M.cap.pct;
   }
 
   // key factors
@@ -743,11 +776,14 @@ function summaryMarkdown(A, aud) {
     if (M.needTeamTime) out.push(`With the recommended team: about ${r10(M.needTeamTime.hours)} hours (${FTE(M.needTeamTime.fte)} FTE for ${M.needTeamTime.workdays} working days).`);
   }
   if (M.cap && !client) {
-    out.push('', `**Productive capacity, ${fd(P.start)} to ${fd(M.capUntil)}**`, '', `| | Per FTE | Team of ${FTE(M.fte)} FTE |`, '|---|---|---|');
-    M.cap.forEach(([n, h], i) => out.push(`| ${n} | ${i ? (h > 0 ? '+' : '−') : ''}${H(Math.abs(h / M.fte))} | ${i ? (h > 0 ? '+' : '−') : ''}${H(Math.abs(h))} |`));
-    out.push(`| **Productive hours** | **${H(M.capTotal / M.fte)} (${pct(M.capPct)})** | **${H(M.capTotal)}** |`);
+    const cap = M.cap;
+    out.push('', `**Productive capacity, ${fd(P.start)} to ${fd(cap.until)} (${cap.wd} working days)**`, '',
+      `| | ${cap.cols.map(c => c.key).join(' | ')} | Team of ${FTE(cap.fte)} FTE |`,
+      '|' + '---|'.repeat(cap.cols.length + 2));
+    cap.rows.forEach((row, i) => out.push(`| ${row.label} | ${row.vals.map(v => signedH(v, i > 0)).join(' | ')} | ${signedH(row.total, i > 0)} |`));
+    out.push(`| **Productive hours** | ${cap.cols.map(c => `**${H(c.per.total)}**`).join(' | ')} | **${H(cap.total)} (${pct(cap.pct)})** |`);
   } else if (M.cap) {
-    out.push('', `**Capacity:** about ${pct(M.capPct)} of the team's working hours go into project work, after public holidays, leave, meetings, downtime and ramp-up.`);
+    out.push('', `**Capacity:** about ${pct(M.cap.pct)} of the team's working hours go into project work, after public holidays, leave, meetings, downtime and ramp-up.`);
   }
   out.push('', '**Key factors**', '', '| Factor | Value |', '|---|---|');
   M.factors.forEach(([n, v]) => out.push(`| ${n} | ${v} |`));
@@ -806,12 +842,13 @@ function viewSummary() {
 
   let capBlock = '';
   if (M.cap) {
-    const sign = (h, i) => i === 0 ? '' : h > 0 ? '+' : '−';
-    capBlock = `<section class="panel"><div class="panel-head"><h2>Productive capacity</h2><span class="small muted">${fd(P.start)} to ${fd(M.capUntil)}</span></div>
-      <div class="tbl-wrap"><table><thead><tr><th>Item</th><th class="r">Per FTE</th><th class="r">Team of ${FTE(M.fte)} FTE</th></tr></thead><tbody>
-      ${M.cap.map(([n, h], i) => `<tr><td>${esc(n)}</td><td class="r num">${sign(h, i)}${H(Math.abs(h / M.fte))}</td><td class="r num">${sign(h, i)}${H(Math.abs(h))}</td></tr>`).join('')}
-      <tr class="total"><td>Productive hours</td><td class="r num">${H(M.capTotal / M.fte)} (${pct(M.capPct)})</td><td class="r num">${H(M.capTotal)}</td></tr>
+    const cap = M.cap;
+    capBlock = `<section class="panel"><div class="panel-head"><h2>Productive capacity</h2><span class="small muted">${fd(P.start)} to ${fd(cap.until)} · ${cap.wd} working days</span></div>
+      <div class="tbl-wrap"><table><thead><tr><th>Item</th>${cap.cols.map(c => `<th class="r">${esc(c.key)}<br><span class="small muted">per FTE</span></th>`).join('')}<th class="r">Team of ${FTE(cap.fte)} FTE</th></tr></thead><tbody>
+      ${cap.rows.map((row, i) => `<tr><td>${esc(row.label)}</td>${cap.cols.map((c, j) => `<td class="r num">${signedH(row.vals[j], i > 0)}</td>`).join('')}<td class="r num">${signedH(row.total, i > 0)}</td></tr>`).join('')}
+      <tr class="total"><td>Productive hours</td>${cap.cols.map(c => `<td class="r num">${H(c.per.total)}</td>`).join('')}<td class="r num">${H(cap.total)} (${pct(cap.pct)})</td></tr>
       </tbody></table></div>
+      <p class="small muted">A role column is one full-time person in that role; the team column adds everyone on the current team. Non-development time is shown against the role it applies to.</p>
       ${A.sched && A.sched.finish ? `<p class="small muted">Up to the estimated finish, ${H(A.sched.idle)} h (${pct(A.sched.idle / (A.sched.work + A.sched.idle || 1))}) of productive time is spent waiting for work: framework not ready, test cases in review, modules not available yet, or no work left in a person’s skill area.</p>` : ''}
       <details class="howto"><summary>By person</summary>
       <div class="tbl-wrap" style="margin-top:8px"><table><thead><tr><th>Name</th><th>Role</th><th>Works on</th><th>Level</th><th class="r">Allocation</th><th class="r">Productive h</th></tr></thead><tbody>
@@ -923,7 +960,7 @@ function viewTeam() {
       <td>${sel(`team.${i}.location`, locs)}</td>
       <td>${inp(`team.${i}.start`, 'date')}</td>
       <td>${inp(`team.${i}.end`, 'date')}</td>
-      <td><button class="btn" data-act="tog-leave" data-id="${r.id}" aria-expanded="${!!open}">${lv ? lv + ' leave' + (lv > 1 ? 's' : '') : 'Add leave'}</button></td>
+      <td><button class="btn" data-act="tog-leave" data-id="${esc(r.id)}" aria-expanded="${!!open}">${lv ? lv + ' leave' + (lv > 1 ? 's' : '') : 'Add leave'}</button></td>
       <td class="r num">${w ? H(w.per[i]) : '—'}</td>
       <td>${S.confirmRm === 'res:' + i ? `<span class="confirm">Remove? <button class="btn danger" data-act="rm-res" data-i="${i}">Yes</button><button class="btn" data-act="rm-no">No</button></span>` : `<button class="btn ghost" data-act="rm-res-ask" data-i="${i}" aria-label="Remove person">Remove</button>`}</td></tr>${leaveRow}`;
   }).join('');
@@ -1117,7 +1154,7 @@ function viewTracking() {
     const sp = r.plannedPct > 0 ? r.pct / r.plannedPct : null, st = sp == null ? null : sp >= 0.97 ? 'ok' : sp >= 0.85 ? 'risk' : 'no';
     return `<tr class="${r.week === S.trWeek ? 'sel' : ''}"><td>${fd(r.week)}</td><td class="r num">${n0(r.designed)}</td><td class="r num">${n0(r.automated)}</td><td class="r num">${n0(r.executed)}</td><td class="r num">${n0(E.hoursOf(r))}</td>
       <td class="r num">${pct(r.pct)}</td><td class="r num">${r.plannedPct == null ? '—' : pct(r.plannedPct)}</td><td>${st ? pill(st, ST_LABEL[st]) : ''}</td>
-      <td class="r"><button class="btn" data-act="tr-edit" data-id="${r.id}">${r.week === S.trWeek ? 'Editing' : 'Edit'}</button> ${S.confirmRm === 'ac:' + r.id ? `<span class="confirm">Remove this week? <button class="btn danger" data-act="rm-ac" data-id="${r.id}">Yes</button><button class="btn" data-act="rm-no">No</button></span>` : `<button class="btn ghost" data-act="rm-ac-ask" data-id="${r.id}">Remove</button>`}</td></tr>`;
+      <td class="r"><button class="btn" data-act="tr-edit" data-id="${esc(r.id)}">${r.week === S.trWeek ? 'Editing' : 'Edit'}</button> ${S.confirmRm === 'ac:' + r.id ? `<span class="confirm">Remove this week? <button class="btn danger" data-act="rm-ac" data-id="${esc(r.id)}">Yes</button><button class="btn" data-act="rm-no">No</button></span>` : `<button class="btn ghost" data-act="rm-ac-ask" data-id="${esc(r.id)}">Remove</button>`}</td></tr>`;
   }).join('');
   const R = S.trWeek ? E.weekReport(P, liveActuals(), A.sched, S.trWeek) : null;
   return `${baselinePanel(A)}
@@ -1141,13 +1178,13 @@ function weekEditor(R) {
     if (!(m[scopeK] > 0)) return '<td class="muted">—</td>';
     const v = (mods[m.id] || {})[key] || 0;
     const room = Math.max(0, Math.round(m[scopeK] - (m.act[key] - m.week[key])));
-    return `<td><input type="number" class="w-s" min="0" max="${room}" step="1" id="ac-${r.id}-${m.id}-${key}" data-ac="${r.id}" data-mod="${m.id}" data-k="${key}" value="${v}"><span class="plan-hint">plan ${n0(m.weekPlan[pk])} · max ${room}</span></td>`;
+    return `<td><input type="number" class="w-s" min="0" max="${room}" step="1" id="ac-${esc(r.id)}-${esc(m.id)}-${key}" data-ac="${esc(r.id)}" data-mod="${esc(m.id)}" data-k="${key}" value="${v}"><span class="plan-hint">plan ${n0(m.weekPlan[pk])} · max ${room}</span></td>`;
   };
   const hasMods = r.mods && Object.keys(r.mods).length;
   const legacy = hasMods ? (r.mods._all || null) : ((+r.designed || 0) + (+r.automated || 0) + (+r.executed || 0) > 0 ? { designed: r.designed, automated: r.automated, executed: r.executed } : null);
   const otRows = R.ot.map(o => {
     const val = r.ot && r.ot[o.key] != null && r.ot[o.key] !== '' ? r.ot[o.key] : '';
-    return `<label class="field"><span class="lbl">${OT_LABEL[o.key]} % done</span><input type="number" min="0" max="100" step="1" id="ac-${r.id}-ot-${o.key}" data-ac="${r.id}" data-ot="${o.key}" value="${val}" placeholder="${o.done != null ? Math.round(o.done) : 0}"><span class="hint">Planned by this week: ${Math.round(o.planned)}%</span></label>`;
+    return `<label class="field"><span class="lbl">${OT_LABEL[o.key]} % done</span><input type="number" min="0" max="100" step="1" id="ac-${esc(r.id)}-ot-${o.key}" data-ac="${esc(r.id)}" data-ot="${o.key}" value="${val}" placeholder="${o.done != null ? Math.round(o.done) : 0}"><span class="hint">Planned by this week: ${Math.round(o.planned)}%</span></label>`;
   }).join('');
   return `<section class="panel">
     <div class="panel-head"><h2>Week of ${fd(R.week)} <span class="muted small">week ${R.weekNo}</span></h2>
@@ -1156,18 +1193,18 @@ function weekEditor(R) {
     ${R.warnings.length ? `<div class="banner" role="status">${R.warnings.map(esc).join('<br>')}</div>` : ''}
     <div class="tbl-wrap"><table><thead><tr><th>Module</th>${KINDS.map(k => `<th>${k[1]}</th>`).join('')}</tr></thead><tbody>
       ${R.mods.map(m => `<tr><td>${esc(m.name)}</td>${KINDS.map(k => cell(m, k)).join('')}</tr>`).join('')}
-      ${R.outside.map(o => `<tr class="sub"><td>${esc(o.name)} <span class="small muted">(not in baseline)</span></td>${KINDS.map(([key]) => `<td><input type="number" class="w-s" min="0" step="1" id="ac-${r.id}-${o.id}-${key}" data-ac="${r.id}" data-mod="${o.id}" data-k="${key}" value="${(mods[o.id] || {})[key] || 0}"></td>`).join('')}</tr>`).join('')}
-      ${legacy ? `<tr class="sub"><td>Not split by module <span class="small muted">(logged before modules)</span></td>${KINDS.map(([key]) => `<td><input type="number" class="w-s" min="0" step="1" id="ac-${r.id}-_all-${key}" data-ac="${r.id}" data-mod="_all" data-k="${key}" value="${legacy[key] || 0}"></td>`).join('')}</tr>` : ''}
+      ${R.outside.map(o => `<tr class="sub"><td>${esc(o.name)} <span class="small muted">(not in baseline)</span></td>${KINDS.map(([key]) => `<td><input type="number" class="w-s" min="0" step="1" id="ac-${esc(r.id)}-${esc(o.id)}-${key}" data-ac="${esc(r.id)}" data-mod="${esc(o.id)}" data-k="${key}" value="${(mods[o.id] || {})[key] || 0}"></td>`).join('')}</tr>`).join('')}
+      ${legacy ? `<tr class="sub"><td>Not split by module <span class="small muted">(logged before modules)</span></td>${KINDS.map(([key]) => `<td><input type="number" class="w-s" min="0" step="1" id="ac-${esc(r.id)}-_all-${key}" data-ac="${esc(r.id)}" data-mod="_all" data-k="${key}" value="${legacy[key] || 0}"></td>`).join('')}</tr>` : ''}
       <tr class="total"><td>This week</td>${KINDS.map(([key, , pk]) => `<td class="num">${n0(R.totals.week[key])} <span class="plan-hint">plan ${n0(R.thisPlan.total[pk])}</span></td>`).join('')}</tr>
     </tbody></table></div>
     ${otRows ? `<div><h3>Setup and framework progress</h3><p class="small muted">Percent complete to date. Leave blank to carry over last week’s figure.</p><div class="fields" style="margin-top:8px">${otRows}</div></div>` : ''}
     <div><h3>Hours logged</h3><p class="small muted">Each person’s timesheet hours for the week. Used for productivity (earned hours per logged hour). Total: <b class="num">${n0(E.hoursOf(r))} h</b>.</p>
-      <div class="fields" style="margin-top:8px">${S.P.team.map(p => `<label class="field"><span class="lbl">${esc(p.name)}</span><input type="number" min="0" max="200" step="any" id="ac-${r.id}-h-${p.id}" data-ac="${r.id}" data-hp="${p.id}" value="${r.hoursBy && r.hoursBy[p.id] != null ? r.hoursBy[p.id] : ''}" placeholder="0"></label>`).join('')}
-      ${Object.keys(r.hoursBy || {}).filter(pid => !S.P.team.some(p => p.id === pid)).map(pid => `<label class="field"><span class="lbl">Former team member</span><input type="number" min="0" max="200" step="any" id="ac-${r.id}-h-${pid}" data-ac="${r.id}" data-hp="${pid}" value="${r.hoursBy[pid]}"><span class="hint">No longer on the team; hours still count</span></label>`).join('')}
-      ${!(r.hoursBy && Object.keys(r.hoursBy).length) && +r.hours > 0 ? `<label class="field"><span class="lbl">Earlier total (not split)</span><input type="number" min="0" step="any" id="ac-${r.id}-hours" data-ac="${r.id}" data-k="hours" value="${+r.hours || 0}"><span class="hint">Replaced once you enter hours per person</span></label>` : ''}</div></div>
+      <div class="fields" style="margin-top:8px">${S.P.team.map(p => `<label class="field"><span class="lbl">${esc(p.name)}</span><input type="number" min="0" max="200" step="any" id="ac-${esc(r.id)}-h-${esc(p.id)}" data-ac="${esc(r.id)}" data-hp="${esc(p.id)}" value="${r.hoursBy && r.hoursBy[p.id] != null ? r.hoursBy[p.id] : ''}" placeholder="0"></label>`).join('')}
+      ${Object.keys(r.hoursBy || {}).filter(pid => !S.P.team.some(p => p.id === pid)).map(pid => `<label class="field"><span class="lbl">Former team member</span><input type="number" min="0" max="200" step="any" id="ac-${esc(r.id)}-h-${esc(pid)}" data-ac="${esc(r.id)}" data-hp="${esc(pid)}" value="${r.hoursBy[pid]}"><span class="hint">No longer on the team; hours still count</span></label>`).join('')}
+      ${!(r.hoursBy && Object.keys(r.hoursBy).length) && +r.hours > 0 ? `<label class="field"><span class="lbl">Earlier total (not split)</span><input type="number" min="0" step="any" id="ac-${esc(r.id)}-hours" data-ac="${esc(r.id)}" data-k="hours" value="${+r.hours || 0}"><span class="hint">Replaced once you enter hours per person</span></label>` : ''}</div></div>
     <div class="grid2">
-      <label class="field"><span class="lbl">Highlights this week</span><textarea rows="4" id="ac-${r.id}-notes" data-ac="${r.id}" data-k="notes" placeholder="One per line, e.g. Login and payments flows automated">${esc(r.notes || '')}</textarea></label>
-      <label class="field"><span class="lbl">Blockers and risks</span><textarea rows="4" id="ac-${r.id}-blockers" data-ac="${r.id}" data-k="blockers" placeholder="One per line, e.g. Test environment down Tuesday to Thursday">${esc(r.blockers || '')}</textarea></label>
+      <label class="field"><span class="lbl">Highlights this week</span><textarea rows="4" id="ac-${esc(r.id)}-notes" data-ac="${esc(r.id)}" data-k="notes" placeholder="One per line, e.g. Login and payments flows automated">${esc(r.notes || '')}</textarea></label>
+      <label class="field"><span class="lbl">Blockers and risks</span><textarea rows="4" id="ac-${esc(r.id)}-blockers" data-ac="${esc(r.id)}" data-k="blockers" placeholder="One per line, e.g. Test environment down Tuesday to Thursday">${esc(r.blockers || '')}</textarea></label>
     </div>
   </section>`;
 }
@@ -1880,7 +1917,17 @@ async function exportXlsx() {
     ...P.modules.map((m, i) => [m.name, m.appType, m.tcs, ...a.complexity.map(c => m.mix[c.key]), m.design ? 'Yes' : 'No', m.manualExec ? 'Yes' : 'No', m.automation ? 'Yes' : 'No', m.autoPct, m.testData, r1(e.mods[i].manual), r1(e.mods[i].auto)])], [28, 12, 10]);
   add('Team', [['Name', 'Role', 'Works on', 'Experience', 'Tool skill', 'Allocation %', 'Location', 'From', 'To', 'Leave', 'Productive h in window'],
     ...P.team.map((r, i) => [r.name, r.role, r.activity, r.level, r.skill, r.alloc, r.location, r.start || P.start, r.end || '', r.leaves.map(l => l.from + ' to ' + (l.to || l.from)).join('; '), A.window ? r1(A.window.per[i]) : ''])], [24, 10, 12, 12, 18, 12, 10, 12, 12, 30, 20]);
-  if (A.window) { const d = A.window.ded; add('Capacity', [['Item', 'Hours'], ['Gross hours', r1(d.gross)], ['Public holidays', -r1(d.holidays)], ['Planned leave', -r1(d.leave)], ['Non-development time', -r1(d.nonDev)], ['Unplanned leave', -r1(d.unplanned)], ['Downtime', -r1(d.downtime)], ['Ramp-up', -r1(d.ramp)], ['Experience and skill adjustment', r1(d.productivity)], ['Productive capacity', r1(A.window.total)]], [36, 12]); }
+  if (SM.cap) {
+    const cap = SM.cap;
+    add('Capacity',
+      [['Item', ...cap.cols.map(c => `${c.key} (per FTE)`), `Team of ${FTE(cap.fte)} FTE`],
+        ...cap.rows.map(row => [row.label, ...row.vals.map(v => v == null ? '' : r1(v)), r1(row.total)]),
+        ['Productive hours', ...cap.cols.map(c => r1(c.per.total)), r1(cap.total)]],
+      [44, ...cap.cols.map(() => 14), 16]);
+  } else if (A.window) {
+    const d = A.window.ded;
+    add('Capacity', [['Item', 'Hours'], ['Gross hours', r1(d.gross)], ['Public holidays', -r1(d.holidays)], ['Planned leave', -r1(d.leave)], ['Non-development time', -r1(d.nonDev)], ['Unplanned leave', -r1(d.unplanned)], ['Downtime', -r1(d.downtime)], ['Ramp-up', -r1(d.ramp)], ['Experience and skill adjustment', r1(d.productivity)], ['Productive capacity', r1(A.window.total)]], [36, 12]);
+  }
   const fac = [['Factor', 'Value'], ['Hours per day', a.hoursPerDay], ['Working days', a.workDays.map(d => DOWN[d]).join(', ')],
     ...a.complexity.flatMap(c => [[c.name + ': design h', c.design], [c.name + ': manual run h', c.exec], [c.name + ': automation h', c.auto]]),
     ...a.appTypes.map(x => ['App type factor: ' + x.key, x.factor]), ...a.testData.map(x => ['Test data factor: ' + x.key, x.factor]),
