@@ -47,6 +47,18 @@ leads, managers and waiting time, which is what gets priced (it is higher than t
 
 The best and worst cases are applied to the base estimate; contingency is not stacked on top.
 
+## Fine tune
+
+The Factors tab has two views: **Factor tables** for precise edits, and **Fine tune** for
+exploring. Fine tune splits the page into a live estimate panel and grouped sliders for the
+factors that move the estimate. The main drivers are shown first; the rest sit under each
+group. Each slider has a numeric box for exact entry, shows the value it had when the view
+was opened, and can be reset on its own. "Reset changes" returns to that opening snapshot;
+"Reset factors to defaults" resets the whole factor set. Every change writes to the same
+project factors as the table, so the Factor tables and Summary show it too, and saving
+happens automatically. Slider ranges come from the same file the server validates with, so
+a slider cannot produce a value that will be rejected.
+
 ## Baseline
 
 Once the estimate is agreed, freeze it as the baseline on the Tracking tab. Lateness is

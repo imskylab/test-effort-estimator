@@ -487,3 +487,45 @@ test('capacity deductions are kept per person and reconcile with the total', () 
   const engineer = p.team.findIndex(r => r.role === 'Engineer');
   assert.ok(c.perDed[lead].nonDev > c.perDed[engineer].nonDev, 'lead coordination exceeds engineer meetings');
 });
+
+/* ---------- Fine tune factor metadata ---------- */
+const F = require('../src/factors.js');
+const getAt = (o, path) => path.split('.').reduce((x, k) => x == null ? x : x[k], o);
+
+test('every fine-tune slider points at a unique numeric default', () => {
+  const a = E.defaults();
+  const list = F.tuneFactors(a);
+  assert.ok(list.length > 30, 'enough factors to tune');
+  assert.strictEqual(new Set(list.map(f => f.path)).size, list.length, 'paths are unique');
+  list.forEach(f => {
+    const v = getAt({ a }, f.path);
+    assert.strictEqual(typeof v, 'number', `${f.path} is numeric`);
+    assert.ok(isFinite(v), `${f.path} is finite`);
+    assert.ok(f.label && f.group, `${f.path} has a label and group`);
+  });
+});
+
+test('fine-tune defaults sit inside their slider range and line up with the step', () => {
+  const a = E.defaults();
+  F.tuneFactors(a).forEach(f => {
+    const v = getAt({ a }, f.path);
+    assert.ok(v >= f.min && v <= f.max, `${f.path}: ${v} in ${f.min}–${f.max}`);
+    assert.ok(f.rangeMax >= f.min && f.rangeMax <= f.max, `${f.path}: slider range inside the limit`);
+    const k = (v - f.min) / f.step;
+    assert.ok(Math.abs(k - Math.round(k)) < 1e-6, `${f.path}: ${v} is a ${f.step} step from ${f.min}`);
+  });
+});
+
+test('fine-tune ranges stay inside the ranges the server accepts', () => {
+  const a = E.defaults();
+  const byKey = {};
+  F.tuneFactors(a).forEach(f => {
+    const key = f.path.slice(2);
+    if (!key.includes('.')) byKey[key] = f;
+  });
+  Object.entries(F.ranges).forEach(([key, [lo, hi]]) => {
+    const f = byKey[key];
+    assert.ok(f, `a fine-tune factor exists for “${key}”`);
+    assert.ok(f.min >= lo && f.max <= hi, `${key}: ${f.min}–${f.max} inside server ${lo}–${hi}`);
+  });
+});

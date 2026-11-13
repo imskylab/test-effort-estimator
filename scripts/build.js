@@ -16,8 +16,8 @@ const root = path.join(__dirname, '..');
 const read = f => fs.readFileSync(path.join(root, 'src', f), 'utf8');
 const head = read('head.html');
 const body = read('body.html');
-const engine = read('engine.js'), ui = read('ui.js');
-const app = engine + '\n' + ui;
+const factors = read('factors.js'), engine = read('engine.js'), ui = read('ui.js');
+const app = factors + '\n' + engine + '\n' + ui;
 
 // Fail the build on a script syntax error rather than shipping a blank page.
 try { new Function(app); } catch (e) { console.error('Script syntax error:', e.message); process.exit(1); }
@@ -38,6 +38,9 @@ ${body}
 <script id="engine-src">
 ${engine}
 </script>
+<script id="factors-src">
+${factors}
+</script>
 <script>
 ${ui}
 </script>
@@ -49,6 +52,9 @@ const artifact = `${head}${body}
 <script src="${XLSX_CDN}"></script>
 <script id="engine-src">
 ${engine}
+</script>
+<script id="factors-src">
+${factors}
 </script>
 <script>
 ${ui}

@@ -29,6 +29,7 @@ const http = require('http');
 const https = require('https');
 const Store = require('./lib/store');
 const Brand = require('./lib/brand');
+const FACTORS = require('./src/factors');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
@@ -221,13 +222,8 @@ function validate(key, body) {
   return null;
 }
 // Factors are optional (older projects get defaults on load) but, when present, must be sane.
-const NUM_RANGES = {
-  hoursPerDay: [1, 24], unplannedLeavePct: [0, 100], downtimePct: [0, 100], reviewPct: [0, 100], maintenancePct: [0, 100],
-  reusePct: [0, 90], retestPct: [0, 100], contingencyPct: [0, 200], rampStartPct: [0, 100], frameworkGatePct: [0, 100],
-  cicdExistingPct: [0, 100], managerAlloc: [0, 100], manualCycles: [0, 20], autoCycles: [0, 500], analysisPer100: [0, 1000],
-  accessDays: [0, 365], reviewDays: [0, 365], cycleGapDays: [0, 365], frameworkMaxPeople: [1, 100], commonMaxPeople: [1, 100],
-  leadSpan: [1, 100], managerAbove: [0, 10000], hireLeadDays: [0, 365], commonPerModule: [0, 10000], pertBest: [0.1, 2], pertWorst: [0.5, 10]
-};
+// The allowed ranges live in src/factors.js, shared with the Fine tune sliders.
+const NUM_RANGES = FACTORS.ranges;
 const ROWS = {
   complexity: { key: 'str', name: 'str', design: [0, 1000], exec: [0, 1000], auto: [0, 1000] },
   appTypes: { key: 'str', factor: [0, 10] }, testData: { key: 'str', factor: [0, 10] },

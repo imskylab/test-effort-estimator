@@ -144,6 +144,33 @@ tr.sel td{background:var(--accent-soft)}
 .seg{display:inline-flex;border:1px solid var(--line);border-radius:6px;overflow:hidden}
 .seg button{border:0;background:var(--surface);color:var(--muted);font:500 13px var(--f-body);padding:6px 12px;cursor:pointer}
 .seg button.on{background:var(--accent);color:var(--accent-ink)}
+.ft-switch{align-items:center;background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:12px 16px;margin:0}
+.ft-switch h2{font-size:18px;margin:0 0 2px}
+.ft-layout{display:grid;grid-template-columns:320px minmax(0,1fr);gap:18px;align-items:start}
+.ft-summary{position:sticky;top:84px}
+.ft-summary .panel-head{align-items:center}
+.ft-kpi{display:grid;gap:1px;padding:9px 0;border-bottom:1px solid var(--line-2)}
+.ft-kpi:last-of-type{border-bottom:0}
+.ft-kpi .v{font-family:var(--f-mono);font-size:20px;font-variant-numeric:tabular-nums}
+.ft-was{font-size:12px;color:var(--faint)}
+.ft-controls{gap:10px}
+.ft-group{display:grid;gap:10px;padding-top:12px;border-top:1px solid var(--line-2)}
+.ft-group:first-of-type{border-top:0;padding-top:0}
+.ft-group h3{font-size:13px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:0}
+.ft-row{display:grid;gap:3px}
+.ft-head{display:flex;justify-content:space-between;align-items:baseline;gap:12px}
+.ft-label{font-size:13.5px;font-weight:500}
+.ft-row.changed .ft-label::after{content:'•';color:var(--accent);margin-left:6px}
+.ft-row.changed .ft-value{font-weight:600}
+.ft-value{font-family:var(--f-mono);font-variant-numeric:tabular-nums;font-size:13.5px;color:var(--accent)}
+.ft-line{display:flex;align-items:center;gap:10px}
+.ft-range{flex:1;min-width:120px;accent-color:var(--accent);height:22px;cursor:pointer}
+input.ft-num{width:78px;flex:none}
+.ft-was{padding:0 4px;font-size:11.5px;flex:none}
+.ft-more summary{cursor:pointer;color:var(--muted);font-size:13px;padding:2px 0}
+.ft-more[open]{display:grid;gap:10px}
+.ft-more[open] summary{margin-bottom:2px}
+@media (max-width:900px){.ft-layout{grid-template-columns:1fr}.ft-summary{position:static}}
 .subject-row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
 .subject-row input{flex:1;min-width:200px}
 .mail{background:#ffffff;color:#1f2a26;border:1px solid var(--line);border-radius:var(--r);padding:16px 20px;max-height:640px;overflow:auto;min-width:0}

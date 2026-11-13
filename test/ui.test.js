@@ -203,3 +203,38 @@ test('a viewer can look and try what-ifs, but nothing is saved', opts, async () 
     assert.deepStrictEqual(errs, []);
   } finally { await browser.close(); srv.stop(); }
 });
+
+test('Fine tune moves the estimate live, syncs the factor table, and resets', opts, async () => {
+  const srv = await startServer(), browser = await chromium.launch(), errs = [];
+  try {
+    const A = await page(browser, srv.base, errs);
+    await openExample(A);
+    await A.click('[data-tab=factors]'); await A.waitForTimeout(400);
+    const tables = await A.$eval('#f-a-reviewPct', el => +el.value);
+    await A.click('[data-act=factors-mode][data-k=tune]'); await A.waitForTimeout(600);
+    const before = await A.innerText('#ft-summary');
+    const target = tables < 60 ? 60 : Math.max(0, tables - 10);
+    await A.$eval('#ft-a-reviewPct', (el, v) => {
+      el.value = String(v);
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+    }, target);
+    await A.waitForTimeout(1400);
+    const after = await A.innerText('#ft-summary');
+    assert.notStrictEqual(after, before, 'summary follows the slider');
+    assert.ok(await A.$('#ft-a-reviewPct'), 'slider is not rebuilt mid-drag');
+    assert.strictEqual(await A.$eval('#ft-a-reviewPct', el => +el.value), target);
+    await A.click('[data-act=factors-mode][data-k=tables]'); await A.waitForTimeout(400);
+    assert.strictEqual(await A.$eval('#f-a-reviewPct', el => +el.value), target, 'factor table has the tuned value');
+    await A.click('[data-act=factors-mode][data-k=tune]'); await A.waitForTimeout(500);
+    await A.$eval('#ft-a-reviewPct', el => {
+      el.value = String(Math.max(+el.min, +el.value - 5));
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    await A.waitForTimeout(900);
+    await A.click('[data-act=tune-reset-start]'); await A.waitForTimeout(600);
+    assert.strictEqual(await A.$eval('#ft-a-reviewPct', el => +el.value), target, 'reset returns to the value when Fine tune opened');
+    assert.deepStrictEqual(errs, []);
+  } finally { await browser.close(); srv.stop(); }
+});

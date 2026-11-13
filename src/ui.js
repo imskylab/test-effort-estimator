@@ -15,16 +15,22 @@ const DOWN = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 // Name shown in the page; set per organisation (see lib/brand.js).
 const BRAND = Object.assign({ name: 'QuEST' }, typeof window !== 'undefined' && window.BRAND || {});
 const S = { db: null, dl: null, list: [], all: [], id: null, P: null, actuals: [], tab: 'summary', saving: '', rev: null,
-  local: false, unsubP: null, unsubA: null, openLeaves: {}, confirmDel: false, A: null };
+  local: false, unsubP: null, unsubA: null, openLeaves: {}, confirmDel: false, A: null,
+  factorsMode: 'tables', tuneStart: null, tuneBase: null, tuneLive: false };
 
 /* ---------- persistence ---------- */
 let saveTimer = null;
-function touch() {
+// Invalidate the results and schedule a save, without re-rendering. Fine tune uses this while a
+// slider is moving, so the control the user is dragging is not rebuilt under their finger.
+function markDirty() {
   S.editSeq = (S.editSeq || 0) + 1;
   S.Aprev = S.A || S.Aprev; S.A = null; S.calculating = false;
   S.saving = 'Unsaved';
   clearTimeout(saveTimer);
   saveTimer = setTimeout(saveNow, 700);
+}
+function touch() {
+  markDirty();
   renderSoon();
 }
 /* Plans are merged in "units": scalar fields, each factor group, each module / person / holiday /
@@ -140,6 +146,7 @@ const brief = v => {
 const canWrite = () => S.db && !S.local && !S.viewOnly;
 async function saveNow() {
   if (!S.P || !S.id) return;
+  clearTimeout(saveTimer);
   if (S.viewOnly) { S.saving = 'View only: changes aren’t saved'; renderHeader(); return; }
   if (S.local || !S.db) { S.saving = S.local ? 'Not saved (offline view)' : ''; const l = S.list.find(x => x.id === S.id); if (l) { l.name = S.P.name; l.client = S.P.client; } renderHeader(); return; }
   if (S.conflict) { S.saving = 'Not saved: choose a version first'; renderHeader(); return; }
@@ -217,6 +224,7 @@ async function resolveConflict(useMine) {
 function openProject(id) {
   if (S.unsubA) { S.unsubA(); S.unsubA = null; }
   S.id = id; S.A = null; S.Aprev = null; S.calculating = false; S.editSeq = (S.editSeq || 0) + 1; S.confirmDel = false; S.actuals = [];
+  S.factorsMode = 'tables'; S.tuneStart = null; S.tuneBase = null; S.tuneLive = false; S.tuneList = null;
   const l = S.list.find(x => x.id === id);
   S.loadError = ''; S.conflict = null;
   S.repaired = null; S.deletedNotice = null; S.calcError = null; S.showDeleted = false;
@@ -431,6 +439,51 @@ document.addEventListener('change', ev => {
   touch();
 });
 
+/* ---------- Fine tune sliders ----------
+ * While a slider moves, only the live summary is refreshed. Rebuilding #main on every pixel would
+ * replace the control being dragged, so the full view is re-rendered once the interaction settles. */
+let tuneCalcTimer = null, tuneSettle = null;
+function scheduleTuneCalc() {
+  if (tuneCalcTimer) return;
+  tuneCalcTimer = setTimeout(() => { tuneCalcTimer = null; runCalc(); renderHeader(); }, 80);
+}
+document.addEventListener('pointerdown', ev => {
+  if (ev.target && ev.target.dataset && ev.target.dataset.ft) S.tunePointer = true;
+}, true);
+document.addEventListener('input', ev => {
+  const el = ev.target, path = el && el.dataset && el.dataset.ft;
+  if (!path || !S.P) return;
+  const f = tuneMeta(path); if (!f) return;
+  const v = clampTune(f, el.value);
+  setPath(S.P, path, v);
+  S.tuneLive = true;
+  clearTimeout(tuneSettle); tuneSettle = null;
+  syncTuneInputs(f, v, el);
+  markDirty(); renderHeader();
+  scheduleTuneCalc();
+});
+document.addEventListener('change', ev => {
+  const el = ev.target;
+  const path = el && el.dataset && (el.dataset.ft || el.dataset.ftn);
+  if (!path || !S.P) return;
+  const f = tuneMeta(path); if (!f) return;
+  const typed = !!el.dataset.ftn;
+  const v = clampTune(f, el.value);
+  if (el.value !== String(v)) el.value = v;
+  setPath(S.P, path, v);
+  syncTuneInputs(f, v, el);
+  markDirty();
+  const released = !!S.tunePointer; S.tunePointer = false;
+  if (released || typed) saveNow();
+  clearTimeout(tuneCalcTimer); tuneCalcTimer = null;
+  clearTimeout(tuneSettle);
+  tuneSettle = setTimeout(() => {
+    tuneSettle = null; S.tuneLive = false;
+    runCalc();
+    if (!worker) renderAll(); // no worker: calculate synchronously on the next render
+  }, released ? 120 : 500);
+});
+
 /* ---------- render scheduling ---------- */
 let rq = false;
 function renderSoon() { if (rq) return; rq = true; requestAnimationFrame(() => { rq = false; renderAll(); }); }
@@ -447,7 +500,12 @@ function startWorker() {
       const { seq, A, error } = ev.data;
       if (calcAgain) { calcAgain = false; runCalc(); return; }
       if (error) { worker = null; S.A = null; S.Aprev = null; S.calculating = false; flushWaiters(); renderAll(); return; }
-      if (seq === S.editSeq && S.P) { S.A = A; S.Aprev = null; S.calculating = false; flushWaiters(); renderAll(); }
+      if (seq === S.editSeq && S.P) {
+        S.A = A; S.Aprev = null; S.calculating = false; flushWaiters();
+        // A slider is still moving: refresh only the live summary, not the slider itself.
+        if (S.tuneLive && S.tab === 'factors' && S.factorsMode === 'tune' && $('#ft-summary')) tuneRefresh();
+        else renderAll();
+      }
       else if (S.P) runCalc(); // the plan changed while this ran: go again
     };
     worker.onerror = () => { worker = null; calcBusy = false; S.Aprev = null; S.calculating = false; flushWaiters(); renderSoon(); };
@@ -456,7 +514,7 @@ function startWorker() {
 function runCalc() {
   if (!worker || !S.P) return;
   if (calcBusy) { calcAgain = true; return; }
-  calcBusy = true;
+  calcBusy = true; S.calculating = true;
   worker.postMessage({ seq: S.editSeq, P: JSON.parse(JSON.stringify(S.P)) });
 }
 // Returns the latest results, or the previous ones (or null on first open) while the worker
@@ -1017,6 +1075,123 @@ function viewCalendar() {
 
 /* ---------- Factors ---------- */
 function viewFactors() {
+  const mode = S.factorsMode === 'tune' ? 'tune' : 'tables';
+  const seg = `<div class="panel-head ft-switch">
+    <div><h2>Factors</h2><span class="small muted">${mode === 'tune' ? 'Drag a slider to see the estimate change; changes are saved automatically.' : 'Edit the numbers behind the estimate.'}</span></div>
+    <div class="seg" role="group" aria-label="Factors view">${[['tables', 'Factor tables'], ['tune', 'Fine tune']].map(([k, l]) => `<button class="${mode === k ? 'on' : ''}" data-act="factors-mode" data-k="${k}" aria-pressed="${mode === k}">${l}</button>`).join('')}</div>
+  </div>`;
+  return seg + (mode === 'tune' ? viewFineTune() : viewFactorTables());
+}
+
+/* ---------- Fine tune ---------- */
+const TUNE_GROUPS = ['Effort', 'Automation', 'Capacity', 'Schedule', 'Team', 'Risk', 'Advanced'];
+const tuneId = f => 'ft-' + f.path.replace(/[^a-z0-9]+/gi, '-');
+function tuneMeta(path) { return (S.tuneList || []).find(f => f.path === path) || null; }
+function tuneVal(f) { const v = +getPath(S.P, f.path); return isFinite(v) ? v : f.min; }
+function tuneStartVal(f) { return S.tuneStart ? +getPath(S.tuneStart, f.path.slice(2)) : null; }
+function clampTune(f, v) {
+  v = +v; if (!isFinite(v)) v = f.min;
+  v = Math.min(f.max, Math.max(f.min, v));
+  const dec = (String(f.step).split('.')[1] || '').length;
+  return dec ? +v.toFixed(dec) : Math.round(v);
+}
+function tuneFmt(f, v) {
+  const n = +v; if (!isFinite(n)) return '—';
+  const dec = (String(f.step).split('.')[1] || '').length;
+  const num = dec ? n.toFixed(dec) : nf0.format(n);
+  if (f.unit === '%') return num + '%';
+  if (f.unit === '×') return num + '×';
+  return f.unit ? `${num} ${f.unit}` : num;
+}
+function tuneSnapshot(A) {
+  return {
+    effort: A.e.total,
+    finish: (A.finish && A.finish.likely && A.finish.likely.date) || null,
+    status: A.status || null,
+    scope: A.scope && typeof A.scope.f === 'number' ? A.scope.f : null,
+    need: A.need && typeof A.need.extra === 'number' ? A.need.extra : null
+  };
+}
+function tuneChanged() {
+  if (!S.tuneStart) return false;
+  return (S.tuneList || []).some(f => {
+    const s = tuneStartVal(f), v = tuneVal(f);
+    return isFinite(s) && Math.abs(s - v) > 1e-9;
+  });
+}
+function tuneSummary(A) {
+  if (!A) return `<div class="panel-head"><h2>Current estimation</h2></div><p class="muted small">Working out…</p>`;
+  if (!S.tuneBase && !S.calculating) S.tuneBase = tuneSnapshot(A);
+  const B = S.tuneBase, P = S.P, e = A.e.total, f = A.finish && A.finish.likely ? A.finish.likely.date : null;
+  const st = A.status || 'nodate';
+  const dE = e - B.effort, dF = f && B.finish ? E.daysBetween(B.finish, f) : null;
+  const dNeed = A.need && A.need.extra != null && B.need != null ? A.need.extra - B.need : null;
+  const dScope = A.scope && A.scope.f != null && B.scope != null ? A.scope.f - B.scope : null;
+  const range = A.e.best != null && A.e.worst != null ? `${H(A.e.best)} – ${H(A.e.worst)} h` : '—';
+  const fb = A.finish && A.finish.best ? A.finish.best.date : null;
+  const fw = A.finish && A.finish.worst ? A.finish.worst.date : null;
+  const gap = f && P.end ? E.daysBetween(P.end, f) : null;
+  return `<div class="panel-head"><h2>Current estimation</h2><div class="row">${pill(...STATUS[st])}${B.status && B.status !== st ? `<span class="ft-was">was ${esc(STATUS[B.status][1])}</span>` : ''}</div></div>
+    <div class="ft-kpi"><span class="lbl">Likely effort</span><span class="v num">${H(e)} h</span><span class="ft-was">${dE ? `${dE > 0 ? '+' : '−'}${H(Math.abs(dE))} h since opening` : 'Same as when opened'}</span></div>
+    <div class="ft-kpi"><span class="lbl">Person-days</span><span class="v num">${PD(e)}</span><span class="ft-was">at ${nf1.format(P.a.hoursPerDay)} h per day</span></div>
+    <div class="ft-kpi"><span class="lbl">Likely finish</span><span class="v num">${f ? fd(f) : '—'}</span><span class="ft-was">${dF == null ? 'No finish date' : dF === 0 ? 'Same as when opened' : `${Math.abs(dF)} days ${dF > 0 ? 'later' : 'earlier'}`}${fb || fw ? ` · best ${fb ? fd(fb) : '—'} · worst ${fw ? fd(fw) : '—'}` : ''}</span></div>
+    <div class="ft-kpi"><span class="lbl">Target</span><span class="v num">${P.end ? fd(P.end) : '—'}</span>${gap == null ? '' : `<span class="ft-was">${gap > 0 ? `${gap} days over` : gap === 0 ? 'on the target date' : `${Math.abs(gap)} days spare`}</span>`}</div>
+    <div class="ft-kpi"><span class="lbl">Best to worst</span><span class="v num" style="font-size:15px">${range}</span><span class="ft-was">range without added contingency</span></div>
+    ${A.need && A.need.extra != null ? `<div class="ft-kpi"><span class="lbl">Team to hit target</span><span class="v num">${A.need.extra === 0 ? 'On track' : '+' + plural(A.need.extra, 'engineer', 'engineers')}</span><span class="ft-was">${A.need.needLeads ? `plus ${plural(A.need.needLeads, 'lead', 'leads')}${A.need.needMgr ? ' and a manager' : ''}` : 'against the current team'}${dNeed ? ` · ${dNeed > 0 ? '+' : '−'}${plural(Math.abs(dNeed), 'engineer', 'engineers')} since opening` : ''}</span></div>` : ''}
+    ${A.scope && A.scope.f != null ? `<div class="ft-kpi"><span class="lbl">Scope that fits</span><span class="v num">${pct(A.scope.f)}</span><span class="ft-was">of the current scope by the target date${dScope ? ` · ${dScope > 0 ? '+' : '−'}${Math.round(Math.abs(dScope) * 100)} pts since opening` : ''}</span></div>` : ''}
+    <p class="small muted">Compared with the estimate when you opened Fine tune. The Factors tables and Summary use the same values.</p>`;
+}
+function tuneRefresh() {
+  const box = $('#ft-summary'); if (!box) return;
+  box.innerHTML = tuneSummary(S.A);
+  const rb = document.querySelector('[data-act="tune-reset-start"]'); if (rb) rb.disabled = !tuneChanged();
+  renderHeader();
+}
+// Keep the slider, its numeric box and its text value showing the same number.
+function syncTuneInputs(f, v, src) {
+  const id = tuneId(f);
+  const r = document.getElementById(id), n = document.getElementById('ftn-' + id), out = document.getElementById('fto-' + id);
+  if (r && r !== src) { if (+r.max < v) r.max = v; if (+r.min > v) r.min = v; r.value = v; }
+  if (n && n !== src) n.value = v;
+  if (out) out.textContent = tuneFmt(f, v);
+}
+function tuneRow(f) {
+  const v = tuneVal(f), start = tuneStartVal(f), id = tuneId(f);
+  const hi = Math.max(f.rangeMax, v), changed = isFinite(start) && Math.abs(start - v) > 1e-9;
+  return `<div class="ft-row${changed ? ' changed' : ''}">
+    <div class="ft-head"><label class="ft-label" for="${id}">${esc(f.label)}</label><output class="ft-value num" id="fto-${id}" for="${id}">${tuneFmt(f, v)}</output></div>
+    <div class="ft-line"><input type="range" class="ft-range" id="${id}" data-ft="${esc(f.path)}" min="${f.min}" max="${hi}" step="${f.step}" value="${v}" aria-label="${esc(f.label)}">
+      <input type="number" class="ft-num" id="ftn-${id}" data-ftn="${esc(f.path)}" min="${f.min}" max="${f.max}" step="${f.step}" value="${v}" aria-label="${esc(f.label)}: type a value">
+      ${changed ? `<button class="btn ghost ft-was" data-act="tune-one" data-p="${esc(f.path)}" title="Back to the value when Fine tune was opened">was ${esc(tuneFmt(f, start))}</button>` : ''}
+    </div>
+    ${f.hint ? `<span class="hint">${esc(f.hint)}</span>` : ''}
+  </div>`;
+}
+function viewFineTune() {
+  const A = analysis();
+  if (A && !S.tuneBase && !S.calculating) S.tuneBase = tuneSnapshot(A);
+  if (!S.tuneStart) S.tuneStart = JSON.parse(JSON.stringify(S.P.a));
+  S.tuneList = tuneFactors(S.P.a).filter(f => { const v = getPath(S.P, f.path); return typeof v === 'number' && isFinite(v); });
+  const groups = TUNE_GROUPS.map(g => {
+    const rows = S.tuneList.filter(f => f.group === g);
+    if (!rows.length) return '';
+    const keys = rows.filter(f => f.key), rest = rows.filter(f => !f.key);
+    return `<section class="ft-group"><h3>${g}</h3>
+      ${keys.map(tuneRow).join('')}
+      ${rest.length ? `<details class="ft-more"><summary>${plural(rest.length, 'more ' + g.toLowerCase() + ' factor', 'more ' + g.toLowerCase() + ' factors')}</summary>${rest.map(tuneRow).join('')}</details>` : ''}
+    </section>`;
+  }).join('');
+  return `<div class="ft-layout">
+    <aside class="panel ft-summary" id="ft-summary">${tuneSummary(A)}</aside>
+    <section class="panel ft-controls">
+      <div class="panel-head"><h2>Fine tune</h2><div class="row"><button class="btn" data-act="tune-reset-start" ${tuneChanged() ? '' : 'disabled'}>Reset changes</button><button class="btn" data-act="reset-factors">Reset factors to defaults</button></div></div>
+      ${S.confirmReset ? `<div class="confirm">Reset every factor to defaults? <button class="btn danger" data-act="reset-yes">Reset</button><button class="btn" data-act="reset-no">Cancel</button></div>` : ''}
+      <p class="small muted">Move a slider to see the effect on effort, finish and scope. The main drivers are shown first; the rest are under each group. Changes are saved for this project automatically.</p>
+      ${groups}
+    </section>
+  </div>`;
+}
+function viewFactorTables() {
   const P = S.P, a = P.a;
   const f = (path, label, hint) => `<label class="field"><span class="lbl">${label}</span>${inp(path, 'num', '', /%/.test(label) ? 'max="100"' : '')}${hint ? `<span class="hint">${hint}</span>` : ''}</label>`;
   return `<p class="note">Defaults follow common industry ranges for functional test automation. Replace them with your own historical numbers as you collect them. Every change applies to this project only.</p>
@@ -1745,10 +1920,36 @@ function weeklyTable(A) {
 /* ---------- actions ---------- */
 document.addEventListener('click', ev => {
   const b = ev.target.closest('[data-act],[data-tab]'); if (!b) return;
-  if (b.dataset.tab) { S.tab = b.dataset.tab; try { localStorage.setItem('tee.tab', S.tab); } catch (e) { } renderAll(); window.scrollTo({ top: 0 }); return; }
+  if (b.dataset.tab) { S.tab = b.dataset.tab; S.tuneLive = false; try { localStorage.setItem('tee.tab', S.tab); } catch (e) { } renderAll(); window.scrollTo({ top: 0 }); return; }
   const act = b.dataset.act, P = S.P, i = +b.dataset.i;
   const mut = fn => { fn(); touch(); };
   switch (act) {
+    case 'factors-mode': {
+      const mode = b.dataset.k === 'tune' ? 'tune' : 'tables';
+      if (mode === S.factorsMode) break;
+      S.factorsMode = mode; S.confirmReset = false; S.tuneLive = false;
+      if (mode === 'tune') {
+        S.tuneStart = S.P ? JSON.parse(JSON.stringify(S.P.a)) : null;
+        S.tuneBase = S.A ? tuneSnapshot(S.A) : null;
+      } else { S.tuneStart = null; S.tuneBase = null; }
+      renderAll();
+      break;
+    }
+    case 'tune-reset-start':
+      if (!S.tuneStart) break;
+      mut(() => {
+        (S.tuneList || []).forEach(f => {
+          const v = tuneStartVal(f);
+          if (isFinite(v)) setPath(S.P, f.path, v);
+        });
+      });
+      break;
+    case 'tune-one': {
+      const f = tuneMeta(b.dataset.p); if (!f) break;
+      const v = tuneStartVal(f); if (!isFinite(v)) break;
+      mut(() => setPath(S.P, f.path, v));
+      break;
+    }
     case 'new': createProject(false); break;
     case 'example': createProject(true); break;
     case 'dup': duplicateProject(); break;
