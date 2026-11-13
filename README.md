@@ -174,6 +174,7 @@ Edit files in `src/`, never `public/index.html` directly: the build overwrites i
 |------|------------|
 | `src/engine.js` | Estimation model: effort, capacity calendar, day-by-day scheduler, team sizing, scope fit, tracking. Pure functions, no DOM. |
 | `src/ui.js` | The page: tabs, forms, charts, schedule views, Excel export, saving. |
+| `src/factors.js` | Fine-tune slider metadata and the factor ranges the server validates against. |
 | `src/head.html` | Title and styles (colour tokens for light and dark themes). |
 | `src/body.html` | Page shell: header and tabs. |
 | `public/store.js` | Storage adapter for the self-hosted version (REST API with polling). |
@@ -184,6 +185,7 @@ Edit files in `src/`, never `public/index.html` directly: the build overwrites i
 | `deploy/` | IIS `web.config` for Windows sign-in, example users and branding files. |
 | `lib/brand.js` | Loads the organisation's name for the tool and fills it into the page. |
 | `PILOT.md` | Intranet pilot kit: setup, sign-in, quick start, scenarios, feedback. |
+| `docs/adr/` | Architecture decision records, including why this is a web app rather than an Excel workbook. |
 | `test/` | Engine, server and browser tests (`node --test`). |
 
 The same `src/` code also runs as a claude.ai artifact, where storage and downloads come
